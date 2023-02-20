@@ -34,3 +34,6 @@ The data collation is in `src/data.py`, the GNN model is in `src/model.py`, and 
 ## Citations and acknowledgments
 
 Much of this repository is based on the [HaloGraphNet](https://github.com/PabloVD/HaloGraphNet) repository ([Villanueva-Domingo et al. 2022](https://ui.adsabs.harvard.edu/abs/2022ApJ...935...30V/abstract)).
+
+This project was made possible by the KITP Program, [*Building a Physical Understanding of Galaxy Evolution with Data-driven Astronomy*
+](https://www.kitp.ucsb.edu/activities/galevo23) (see also the [website](https://datadrivengalaxyevolution.github.io/)).
