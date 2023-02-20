@@ -43,9 +43,11 @@ class EdgePointLayer(MessagePassing):
         return self.propagate(edge_index, x=x)
 
     def message(self, x_i, x_j):
-        # x_j defines the features of neighboring nodes as shape [num_edges, in_channels]
-        # pos_j defines the position of neighboring nodes as shape [num_edges, 3]
-        # pos_i defines the position of central nodes as shape [num_edges, 3]
+        """Message passing function:
+            x_j defines the features of neighboring nodes as shape [num_edges, in_channels]
+            pos_j defines the position of neighboring nodes as shape [num_edges, 3]
+            pos_i defines the position of central nodes as shape [num_edges, 3]
+        """
 
         pos_i, pos_j = x_i[:,:3], x_j[:,:3]
 
@@ -70,7 +72,7 @@ class EdgePointGNN(nn.Module):
         ]
 
         self.layers = nn.ModuleList(layers)
-        self.lin = nn.Sequential(
+        self.fc = nn.Sequential(
             nn.Linear(latent_channels * 3 + 2, latent_channels, bias=True),
             nn.SiLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
@@ -94,11 +96,11 @@ class EdgePointGNN(nn.Module):
         self.h = x
             
         # use all the pooling! (and also the extra global features `u`)
-        addpool = global_add_pool(x, batch) # [num_examples, hidden_channels]
+        addpool = global_add_pool(x, batch)
         meanpool = global_mean_pool(x, batch)
         maxpool = global_max_pool(x, batch)
         self.pooled = torch.cat([addpool, meanpool, maxpool, u], dim=1)
 
-        # final linear layer
-        return self.lin(self.pooled)
+        # final fully connected layer
+        return self.fc(self.pooled)
         
