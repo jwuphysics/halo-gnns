@@ -22,6 +22,14 @@ science_params = dict(
     minimum_log_stellar_mass=8.5, 
 )
 
+feature_params = dict(
+    use_stellarhalfmassradius=True,
+    use_velocity=True,
+    use_only_positions=False,
+    use_central_galaxy_frame=False, # otherwise use center of mass frame
+    in_projection=True, # only use projected positions and radial velocity
+)
+
 def correct_boundary(pos, boxlength=1.):
     """Correct periodic boundary conditions. 
     Originally from https://github.com/PabloVD/HaloGraphNet"""
@@ -53,7 +61,7 @@ def split_datasets(dataset, rng, valid_frac=0.15, test_frac=0.15, batch_size=128
 
     return train_loader, valid_loader, test_loader
 
-def load_data(filename, use_stellarhalfmassradius=True, use_velocity=True, use_only_positions=False):
+def load_data(filename, use_stellarhalfmassradius=True, use_velocity=True, use_only_positions=False, in_projection=True):
     """Loads Pandas DataFrame of halos and subhalos in a given file."""
 
     # details of catalog: https://www.tng-project.org/data/docs/specifications/#sec2a
@@ -109,9 +117,12 @@ def load_data(filename, use_stellarhalfmassradius=True, use_velocity=True, use_o
             'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 
         ]].copy()
 
+    if in_projection:
+        df.drop(['subhalo_z', 'subhalo_vx', 'subhalo_vy'], axis=1, inplace=True)
+
     return df
 
-def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_only_positions=False):
+def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_only_positions=False, in_projection=True):
     """Iterate through a dataframe and create a PyG Data object"""
 
     dataset = []
@@ -126,26 +137,42 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
         if use_central_galaxy_frame:
             # shift positions and velocities to central galaxy rest frame
             for x in ['x', 'y', 'z', 'vx', 'vy', 'vz']:
-                subs[f'subhalo_{x}'] -= subs.iloc[0][f'subhalo_{x}']
+                if x in subs.columns:
+                    subs[f'subhalo_{x}'] -= subs.iloc[0][f'subhalo_{x}']
         else:
             # shift positions and velocities to halo rest frame
             for x in ['x', 'y', 'z', 'vx', 'vy', 'vz']:
-                subs[f'subhalo_{x}'] -= subs[f'halo_{x}']
+                if x in subs.columns:
+                    subs[f'subhalo_{x}'] -= subs[f'halo_{x}']
 
         # correct for periodic boundary conditions
-        subs[['subhalo_x', 'subhalo_y', 'subhalo_z']] = correct_boundary(
-            subs[['subhalo_x', 'subhalo_y', 'subhalo_z']].values
-        )
+        if in_projection:
+            subs[['subhalo_x', 'subhalo_y']] = correct_boundary(
+                subs[['subhalo_x', 'subhalo_y']].values
+            )
+        else:    
+            subs[['subhalo_x', 'subhalo_y', 'subhalo_z']] = correct_boundary(
+                subs[['subhalo_x', 'subhalo_y', 'subhalo_z']].values
+            )
 
         # normalize velocities if using them
         if use_velocity:
             if use_central_galaxy_frame:
                 subhalo_vel = np.log10(1.+np.sqrt(np.sum(subs[['subhalo_vx', 'subhalo_vy', 'subhalo_vz']].values**2., 1)))
             else:
-                subhalo_vel = np.log10(np.sqrt(np.sum(subs[['subhalo_vx', 'subhalo_vy', 'subhalo_vz']].values**2., 1)))
-            features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
+                if in_projection:
+                    subhalo_vel = np.log10(np.sqrt(np.sum(subs[['subhalo_vz']].values**2., 1)))
+                else:  
+                    subhalo_vel = np.log10(np.sqrt(np.sum(subs[['subhalo_vx', 'subhalo_vy', 'subhalo_vz']].values**2., 1)))
+            if in_projection:
+                features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
+            else:
+                features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
         else:
-            features = subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius']].values
+            if in_projection:
+                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius']].values
+            else:
+                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius']].values
 
         # global features: N_subhalos, total stellar mass, 
         u = np.zeros((1,2), dtype=np.float32)
@@ -159,9 +186,13 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
         # create pyg dataset
         graph = Data(
             x=torch.tensor(features, dtype=torch.float32), 
-            pos=torch.tensor(subs[['subhalo_x', 'subhalo_y', 'subhalo_z']].values, dtype=torch.float32), 
-            # y=torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32),  # central halo mass is same for all
-            y=torch.tensor(log_stellar_halo_mass_ratio, dtype=torch.float32), # estimate stellar mass to halo mass ratio
+            pos=(
+                torch.tensor(subs[['subhalo_x', 'subhalo_y']].values, dtype=torch.float32)
+                if in_projection else
+                torch.tensor(subs[['subhalo_x', 'subhalo_y', 'subhalo_z']].values, dtype=torch.float32)
+            ),
+            y=torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32),  # central halo mass is same for all
+            # y=torch.tensor(log_stellar_halo_mass_ratio, dtype=torch.float32), # estimate stellar mass to halo mass ratio
             u=torch.tensor(u, dtype=torch.float32)
         )
 

@@ -27,14 +27,16 @@ if __name__ == "__main__":
             filename, 
             use_stellarhalfmassradius=feature_params["use_stellarhalfmassradius"],
             use_velocity=feature_params["use_velocity"],
-            use_only_positions=feature_params["use_only_positions"]
+            use_only_positions=feature_params["use_only_positions"],
+            in_projection=feature_params["in_projection"]
         )
 
         dataset_, n_subhalos_ = generate_dataset(
             df,
             use_velocity=feature_params["use_velocity"],
             use_central_galaxy_frame=feature_params["use_central_galaxy_frame"],
-            use_only_positions=feature_params["use_only_positions"]
+            use_only_positions=feature_params["use_only_positions"],
+            in_projection=feature_params["in_projection"]
         )
         
         dataset += dataset_
@@ -77,7 +79,7 @@ if __name__ == "__main__":
     train_losses = []
     valid_losses = []
     for epoch in range(training_params["n_epochs"]):
-        train_loss = train(train_loader, model, optimizer, device)
+        train_loss = train(train_loader, model, optimizer, device, in_projection=feature_params["in_projection"])
         valid_loss, valid_std, *_ = validate(valid_loader, model, device)
         
         train_losses.append(train_loss)
@@ -88,7 +90,7 @@ if __name__ == "__main__":
     
     test_loss, test_std, p_test, y_test, logvar_test = validate(test_loader, model, device)
 
-    print(f"Test loss: {test_loss: >4.1f} Test std: {test_std: >5.3f}")
+    print(f"Test RMSE: {np.sqrt(np.mean((y_test - p_test)**2)): >4.3f}  Test loss: {test_loss: >4.1f} Test std: {test_std: >5.3f}")
 
     np.save(f"{ROOT}/results/predict_smhm/test_preds.npy", p_test)
     np.save(f"{ROOT}/results/predict_smhm/test_trues.npy", y_test)

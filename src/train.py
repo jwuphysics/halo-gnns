@@ -5,23 +5,28 @@ from scipy.spatial.transform import Rotation
 
 training_params = dict(
     batch_size=128,
-    learning_rate=1e-4,
+    learning_rate=3e-4,
     weight_decay=1e-7,
     n_epochs=100,
     valid_frac=0.15, # fraction of dataset for validation
     test_frac=0.15,  # fraction of dataset for testing
 )
 
-def train(dataloader, model, optimizer, device):
+def train(dataloader, model, optimizer, device, in_projection=True):
     model.train()
 
     loss_total = 0
     for data in dataloader:
 
         # random rotation for data augmentation
-        R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
-        data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
-        data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
+        if in_projection:
+            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)[:2, :2]
+            data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
+            data.x[:, :2] = (R @ data.x[:, :2].unsqueeze(-1)).squeeze()
+        else:
+            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
+            data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
+            data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
 
         data.to(device)
 
