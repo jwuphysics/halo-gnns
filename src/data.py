@@ -20,6 +20,7 @@ normalization_params = dict(
 
 science_params = dict(
     minimum_log_stellar_mass=8.5, 
+    predict_output="log_stellar_halo_mass_ratio", # or just "log_halo_mass"
 )
 
 feature_params = dict(
@@ -181,8 +182,11 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
             u[0, 1] = np.log10(np.sum(10.**subs["subhalo_logstellarmass"]))
 
         # create a new feature, which is the stellar mass to halo mass ratio 
-        log_stellar_halo_mass_ratio = (subs["subhalo_logstellarmass"] - subs["halo_logmass"]).max()
-
+        if science_params["predict_output"] == "log_stellar_halo_mass_ratio":
+            y = (subs["subhalo_logstellarmass"] - subs["halo_logmass"]).max()
+        elif science_params["predict_output"] == "log_halo_mass":
+            y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
+            
         # create pyg dataset
         graph = Data(
             x=torch.tensor(features, dtype=torch.float32), 
@@ -191,8 +195,7 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
                 if in_projection else
                 torch.tensor(subs[['subhalo_x', 'subhalo_y', 'subhalo_z']].values, dtype=torch.float32)
             ),
-            # y=torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32),  # central halo mass is same for all
-            y=torch.tensor(log_stellar_halo_mass_ratio, dtype=torch.float32), # estimate stellar mass to halo mass ratio
+            y=y,
             u=torch.tensor(u, dtype=torch.float32)
         )
 
