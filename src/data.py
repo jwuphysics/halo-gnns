@@ -19,8 +19,8 @@ normalization_params = dict(
 )
 
 science_params = dict(
-    minimum_log_stellar_mass=8.5, 
-    predict_output="log_stellar_halo_mass_ratio", # or just "log_halo_mass"
+    minimum_log_stellar_mass=5, 
+    predict_output="log_halo_mass", # or just "stellar_mass_halo_mass_ratio"
 )
 
 feature_params = dict(
@@ -28,7 +28,7 @@ feature_params = dict(
     use_velocity=True,
     use_only_positions=False,
     use_central_galaxy_frame=False, # otherwise use center of mass frame
-    in_projection=True, # only use projected positions and radial velocity
+    in_projection=False, # only use projected positions and radial velocity
 )
 
 def correct_boundary(pos, boxlength=1.):

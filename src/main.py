@@ -3,10 +3,10 @@ from model import *
 from train import *
 import random
 
-seed = 42
+seed = 255
 
 ROOT = Path(__file__).parents[1].resolve()
-
+experiment = "predict_Mhalo"
 
 verbose = True
 
@@ -17,7 +17,7 @@ if __name__ == "__main__":
     random.seed(seed)
     torch.manual_seed(seed)
 
-    filenames = [f"{ROOT}/data/FOF_Subfind/IllustrisTNG/CV_{n}/fof_subhalo_tab_033.hdf5" for n in range(27)]
+    filenames = [f"{ROOT}/camels_data/FOF_Subfind/IllustrisTNG/CV_{n}/fof_subhalo_tab_033.hdf5" for n in range(27)]
     
     dataset = []
     n_subhalos = 0
@@ -92,6 +92,6 @@ if __name__ == "__main__":
 
     print(f"Test RMSE: {np.sqrt(np.mean((y_test - p_test)**2)): >4.3f}  Test loss: {test_loss: >4.1f} Test std: {test_std: >5.3f}")
 
-    np.save(f"{ROOT}/results/predict_smhm/test_preds.npy", p_test)
-    np.save(f"{ROOT}/results/predict_smhm/test_trues.npy", y_test)
-    np.save(f"{ROOT}/results/predict_smhm/test_logvars.npy", logvar_test)
+    np.save(f"{ROOT}/results/{experiment}/test_preds.npy", p_test)
+    np.save(f"{ROOT}/results/{experiment}/test_trues.npy", y_test)
+    np.save(f"{ROOT}/results/{experiment}/test_logvars.npy", logvar_test)

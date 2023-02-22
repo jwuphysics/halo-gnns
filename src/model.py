@@ -9,10 +9,10 @@ from torch_cluster import knn_graph, radius_graph
 from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min
 
 model_params = dict(
-    k_nn=0.2,
+    k_nn=0.15,
     n_layers=1,  # currently doesn't work for more than 1 layer
-    n_hidden=64,
-    n_latent=64,
+    n_hidden=1024,
+    n_latent=512,
     loop=False
 )
 
@@ -20,7 +20,7 @@ class EdgePointLayer(MessagePassing):
     """Adapted from https://github.com/PabloVD/HaloGraphNet.
     Initialized with `sum` aggregation, although `max` or others are possible.
     """
-    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=True):
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='max', use_mod=True):
         super(EdgePointLayer, self).__init__(aggr)
 
         # Initialization of the MLP:
