@@ -4,10 +4,10 @@ from scipy.spatial.transform import Rotation
 
 
 training_params = dict(
-    batch_size=128,
-    learning_rate=3e-4,
-    weight_decay=1e-7,
-    n_epochs=100,
+    batch_size=64,
+    learning_rate=1e-4,
+    weight_decay=1e-8,
+    n_epochs=150,
     valid_frac=0.15, # fraction of dataset for validation
     test_frac=0.15,  # fraction of dataset for testing
 )

@@ -6,7 +6,9 @@ import random
 seed = 42
 
 ROOT = Path(__file__).parents[1].resolve()
+tng_base_path = f"{ROOT}/illustris_data/TNG50-1/output"
 
+experiment = "predict_Mhalo" # mass accretion rate, versus smhm
 
 verbose = True
 
@@ -17,31 +19,23 @@ if __name__ == "__main__":
     random.seed(seed)
     torch.manual_seed(seed)
 
-    filenames = [f"{ROOT}/data/FOF_Subfind/IllustrisTNG/CV_{n}/fof_subhalo_tab_033.hdf5" for n in range(27)]
-    
-    dataset = []
-    n_subhalos = 0
+    df = load_data(
+        tng_base_path=tng_base_path,
+        snapshot=config_params["snapshot"], # default is 99 -> z=0 
+        use_stellarhalfmassradius=feature_params["use_stellarhalfmassradius"],
+        use_velocity=feature_params["use_velocity"],
+        use_only_positions=feature_params["use_only_positions"],
+        in_projection=feature_params["in_projection"]
+    )
 
-    for filename in filenames:
-        df = load_data(
-            filename, 
-            use_stellarhalfmassradius=feature_params["use_stellarhalfmassradius"],
-            use_velocity=feature_params["use_velocity"],
-            use_only_positions=feature_params["use_only_positions"],
-            in_projection=feature_params["in_projection"]
-        )
-
-        dataset_, n_subhalos_ = generate_dataset(
-            df,
-            use_velocity=feature_params["use_velocity"],
-            use_central_galaxy_frame=feature_params["use_central_galaxy_frame"],
-            use_only_positions=feature_params["use_only_positions"],
-            in_projection=feature_params["in_projection"]
-        )
+    dataset, n_subhalos = generate_dataset(
+        df,
+        use_velocity=feature_params["use_velocity"],
+        use_central_galaxy_frame=feature_params["use_central_galaxy_frame"],
+        use_only_positions=feature_params["use_only_positions"],
+        in_projection=feature_params["in_projection"]
+    )
         
-        dataset += dataset_
-        n_subhalos += n_subhalos_
-    
     node_features = dataset[0].x.shape[1]
     n_halos = len(dataset)
     
@@ -92,6 +86,6 @@ if __name__ == "__main__":
 
     print(f"Test RMSE: {np.sqrt(np.mean((y_test - p_test)**2)): >4.3f}  Test loss: {test_loss: >4.1f} Test std: {test_std: >5.3f}")
 
-    np.save(f"{ROOT}/results/predict_smhm/test_preds.npy", p_test)
-    np.save(f"{ROOT}/results/predict_smhm/test_trues.npy", y_test)
-    np.save(f"{ROOT}/results/predict_smhm/test_logvars.npy", logvar_test)
+    np.save(f"{ROOT}/results/{experiment}/test_preds.npy", p_test)
+    np.save(f"{ROOT}/results/{experiment}/test_trues.npy", y_test)
+    np.save(f"{ROOT}/results/{experiment}/test_logvars.npy", logvar_test)

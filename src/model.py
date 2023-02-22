@@ -11,8 +11,8 @@ from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min
 model_params = dict(
     k_nn=0.2,
     n_layers=1,  # currently doesn't work for more than 1 layer
-    n_hidden=64,
-    n_latent=64,
+    n_hidden=128,
+    n_latent=96,
     loop=False
 )
 
