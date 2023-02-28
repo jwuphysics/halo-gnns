@@ -19,8 +19,8 @@ normalization_params = dict(
 )
 
 science_params = dict(
-    minimum_log_stellar_mass=5, 
-    predict_output="log_halo_mass", # or just "stellar_mass_halo_mass_ratio"
+    minimum_log_stellar_mass=8.5, 
+    predict_output="log_stellar_halo_mass_ratio", # or just "log_halo_mass"
 )
 
 feature_params = dict(
@@ -134,7 +134,7 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
         # select halos with at least one satellite (besides central)
         if subs.shape[0] <= 1: 
             continue
-
+            
         if use_central_galaxy_frame:
             # shift positions and velocities to central galaxy rest frame
             for x in ['x', 'y', 'z', 'vx', 'vy', 'vz']:
@@ -183,7 +183,7 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
 
         # create a new feature, which is the stellar mass to halo mass ratio 
         if science_params["predict_output"] == "log_stellar_halo_mass_ratio":
-            y = (subs["subhalo_logstellarmass"] - subs["halo_logmass"]).max()
+            y =  torch.tensor((subs["subhalo_logstellarmass"] - subs["halo_logmass"]).iloc[0], dtype=torch.float32)
         elif science_params["predict_output"] == "log_halo_mass":
             y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
             

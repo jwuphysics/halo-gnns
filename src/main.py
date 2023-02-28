@@ -6,7 +6,7 @@ import random
 seed = 255
 
 ROOT = Path(__file__).parents[1].resolve()
-experiment = "predict_Mhalo"
+experiment = "predict_smhm"
 
 verbose = True
 

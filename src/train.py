@@ -6,7 +6,7 @@ from scipy.spatial.transform import Rotation
 training_params = dict(
     batch_size=128,
     learning_rate=3e-4,
-    weight_decay=1e-7,
+    weight_decay=1e-8,
     n_epochs=100,
     valid_frac=0.15, # fraction of dataset for validation
     test_frac=0.15,  # fraction of dataset for testing
@@ -34,8 +34,8 @@ def train(dataloader, model, optimizer, device, in_projection=True):
         y_pred, logvar_pred = model(data).chunk(2, dim=1)
 
         # compute loss as sum of two terms for likelihood-free inference
-        loss_mse = torch.mean((y_pred - data.y)**2)
-        loss_lfi = torch.mean(((y_pred - data.y)**2 - 10**logvar_pred)**2)
+        loss_mse = torch.nn.functional.mse_loss(y_pred.flatten(), data.y)
+        loss_lfi = torch.nn.functional.mse_loss(y_pred - data.y, 10**logvar_pred)
         loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
         loss.backward()
