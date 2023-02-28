@@ -20,8 +20,9 @@ normalization_params = dict(
     norm_velocity=100., # note: use value of 1 if `use_central_galaxy_frame=True`
 )
 
+# predict outputs: M_acc_dyn, log_stellar_halo_mass_ratio, log_halo_mass
 science_params = dict(
-    minimum_log_stellar_mass=7.5,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
+    minimum_log_stellar_mass=7.,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
     predict_output="log_halo_mass",     # predict log mass accretion in dynamical time (https://arxiv.org/abs/1703.09712)
 )
 
@@ -30,7 +31,7 @@ feature_params = dict(
     use_velocity=True,
     use_only_positions=False,
     use_central_galaxy_frame=False, # otherwise use center of mass frame
-    in_projection=False, # only use projected positions and radial velocity
+    in_projection=True, # only use projected positions and radial velocity
 )
 
 def correct_boundary(pos, boxlength=1.):
@@ -204,7 +205,7 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
 
         # create a new feature, which is the stellar mass to halo mass ratio 
         if science_params["predict_output"] == "log_stellar_halo_mass_ratio":
-            y = (subs["subhalo_logstellarmass"] - subs["halo_logmass"]).max()
+            y = torch.tensor((subs["subhalo_logstellarmass"] - subs["halo_logmass"]).iloc[0], dtype=torch.float32)
         elif science_params["predict_output"] == "log_halo_mass":
             y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
         elif science_params["predict_output"] == "M_acc_dyn":

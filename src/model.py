@@ -9,7 +9,7 @@ from torch_cluster import knn_graph, radius_graph
 from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min
 
 model_params = dict(
-    k_nn=0.2,
+    k_nn=1.,
     n_layers=1,  # currently doesn't work for more than 1 layer
     n_hidden=128,
     n_latent=96,
@@ -28,11 +28,10 @@ class EdgePointLayer(MessagePassing):
         # dimensionality plus point dimensionality (=3, or 1 if only modulus is used).
         self.mlp = nn.Sequential(
             nn.Linear(2 * in_channels - 2, mid_channels, bias=True),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Linear(mid_channels, mid_channels, bias=True),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Linear(mid_channels, out_channels, bias=True),
-            nn.SiLU()
         )
 
         self.messages = 0.
@@ -74,9 +73,9 @@ class EdgePointGNN(nn.Module):
         self.layers = nn.ModuleList(layers)
         self.fc = nn.Sequential(
             nn.Linear(latent_channels * 3 + 2, latent_channels, bias=True),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Linear(latent_channels, 2, bias=True)
         )
         self.k_nn = k_nn
@@ -94,6 +93,7 @@ class EdgePointGNN(nn.Module):
             x = layer(x, edge_index=edge_index)
         
         self.h = x
+        x = x.relu()
             
         # use all the pooling! (and also the extra global features `u`)
         addpool = global_add_pool(x, batch)

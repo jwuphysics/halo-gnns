@@ -11,6 +11,7 @@ tng_base_path = f"{ROOT}/illustris_data/TNG50-1/output"
 experiment = "predict_Mhalo" # mass accretion rate, versus smhm
 
 verbose = True
+plot_figures = True
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -86,6 +87,19 @@ if __name__ == "__main__":
 
     print(f"Test RMSE: {np.sqrt(np.mean((y_test - p_test)**2)): >4.3f}  Test loss: {test_loss: >4.1f} Test std: {test_std: >5.3f}")
 
+    # save results
     np.save(f"{ROOT}/results/{experiment}/test_preds.npy", p_test)
     np.save(f"{ROOT}/results/{experiment}/test_trues.npy", y_test)
     np.save(f"{ROOT}/results/{experiment}/test_logvars.npy", logvar_test)
+
+    if plot_figures:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(4, 4), dpi=200)
+
+        plt.scatter(p_test+10, y_test+10, s=5, edgecolors='none', c="#003f5c")
+        plt.xlabel("$\\log(M_\\bigstar/[M_\\odot\ h^{-1}])$")
+        plt.ylabel("$\\log(M_{\\rm halo}/[M_\\odot\ h^{-1}])$")
+        plt.xlim(10, 14)
+        plt.ylim(10, 14)
+        plt.grid(alpha=0.15)
+        plt.savefig(f"{ROOT}/results/{experiment}/results.png")
