@@ -35,7 +35,7 @@ def train(dataloader, model, optimizer, device, in_projection=True):
 
         # compute loss as sum of two terms for likelihood-free inference
         loss_mse = torch.nn.functional.mse_loss(y_pred.flatten(), data.y)
-        loss_lfi = torch.nn.functional.mse_loss(y_pred - data.y, 10**logvar_pred)
+        loss_lfi = torch.nn.functional.mse_loss(y_pred.flatten() - data.y, 10**logvar_pred.flatten())
         loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
         loss.backward()
@@ -61,8 +61,8 @@ def validate(dataloader, model, device):
             uncertainties.append(np.sqrt(10**logvar_pred.detach().cpu().numpy()).mean())
 
             # compute loss as sum of two terms for likelihood-free inference
-            loss_mse = torch.mean((y_pred - data.y)**2)
-            loss_lfi = torch.mean(((y_pred - data.y)**2 - 10**logvar_pred)**2)
+            loss_mse = torch.nn.functional.mse_loss(y_pred.flatten(), data.y)
+            loss_lfi = torch.nn.functional.mse_loss(y_pred.flatten() - data.y, 10**logvar_pred.flatten())
             loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
             loss_total += loss.item()
