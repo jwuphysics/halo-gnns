@@ -4,9 +4,9 @@ from scipy.spatial.transform import Rotation
 import torch.nn.functional as F
 
 training_params = dict(
-    batch_size=64,
-    learning_rate=1e-4,
-    weight_decay=1e-8,
+    batch_size=256,
+    learning_rate=3e-2,
+    weight_decay=1e-5,
     n_epochs=150,
     valid_frac=0.15, # fraction of dataset for validation
     test_frac=0.15,  # fraction of dataset for testing

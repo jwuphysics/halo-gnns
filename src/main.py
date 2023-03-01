@@ -94,12 +94,14 @@ if __name__ == "__main__":
 
     if plot_figures:
         import matplotlib.pyplot as plt
+        h = config_params["h_reduced"]
         plt.figure(figsize=(4, 4), dpi=200)
-
-        plt.scatter(p_test+10, y_test+10, s=5, edgecolors='none', c="#003f5c")
-        plt.xlabel("$\\log(M_\\bigstar/[M_\\odot\ h^{-1}])$")
-        plt.ylabel("$\\log(M_{\\rm halo}/[M_\\odot\ h^{-1}])$")
-        plt.xlim(10, 14)
-        plt.ylim(10, 14)
+        plt.plot([10, 15], [10, 15], c='0.7', lw=2, zorder=1)
+        plt.scatter(p_test+10+h, y_test+10+h, s=5, edgecolors='none', c="#003f5c", zorder=3)
+        plt.xlabel("True $\\log(M_{\\rm halo}/[M_\\odot])$")
+        plt.ylabel("Predicted $\\log(M_{\\rm halo}/[M_\\odot])$")
+        plt.xlim(11, 14)
+        plt.ylim(11, 14)
+        plt.tight_layout()
         plt.grid(alpha=0.15)
         plt.savefig(f"{ROOT}/results/{experiment}/results.png")

@@ -22,7 +22,7 @@ normalization_params = dict(
 
 # predict outputs: M_acc_dyn, log_stellar_halo_mass_ratio, log_halo_mass
 science_params = dict(
-    minimum_log_stellar_mass=7.,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
+    minimum_log_stellar_mass=8.,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
     predict_output="log_halo_mass",     # predict log mass accretion in dynamical time (https://arxiv.org/abs/1703.09712)
 )
 
@@ -78,7 +78,7 @@ def load_data(
     # see https://www.tng-project.org/data/docs/specifications/
     subhalo_fields = [
         "SubhaloPos", "SubhaloMassType", "SubhaloLenType", "SubhaloHalfmassRadType", 
-        "SubhaloVel", "SubhaloGrNr"
+        "SubhaloVel", "SubhaloGrNr", "SubhaloFlag"
     ]
     subhalos = il.groupcat.loadSubhalos(tng_base_path, snapshot, fields=subhalo_fields) 
 
@@ -90,6 +90,7 @@ def load_data(
     subhalo_n_stellar_particles = subhalos["SubhaloLenType"][:,4]
     subhalo_stellarhalfmassradius = subhalos["SubhaloHalfmassRadType"][:,4] / normalization_params["norm_half_mass_radius"]
     subhalo_vel = subhalos["SubhaloVel"][:] / normalization_params["norm_velocity"]
+    subhalo_flag = subhalos["SubhaloFlag"][:]
     halo_id = subhalos["SubhaloGrNr"][:]
 
     halo_mass = halos["Group_M_Crit200"][:]
@@ -103,11 +104,14 @@ def load_data(
 
     # get subhalos/galaxies      
     subhalos = pd.DataFrame(
-        np.column_stack([halo_id, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius]), 
-        columns=['halo_id', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius'],
+        np.column_stack([halo_id, subhalo_flag, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius]), 
+        columns=['halo_id', 'subhalo_flag', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius'],
     )
+    subhalos = subhalos[subhalos["subhalo_flag"] != 0].copy()
     subhalos['halo_id'] = subhalos['halo_id'].astype(int)
     subhalos['subhalo_id'] = subhalos['subhalo_id'].astype(int)
+
+    subhalos.drop("subhalo_flag", axis=1, inplace=True)
 
     # impose stellar mass and particle cuts
     subhalos = subhalos[subhalos["subhalo_n_stellar_particles"] > normalization_params["minimum_n_star_particles"]].copy()
