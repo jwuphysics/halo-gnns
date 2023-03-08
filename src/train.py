@@ -4,10 +4,10 @@ from scipy.spatial.transform import Rotation
 import torch.nn.functional as F
 
 training_params = dict(
-    batch_size=256,
-    learning_rate=3e-2,
+    batch_size=512,
+    learning_rate=1e-3,
     weight_decay=1e-5,
-    n_epochs=150,
+    n_epochs=200,
     valid_frac=0.15, # fraction of dataset for validation
     test_frac=0.15,  # fraction of dataset for testing
 )
@@ -27,7 +27,7 @@ def train(dataloader, model, optimizer, device, in_projection=True):
             R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
             data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
             data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
-
+        
         data.to(device)
 
         optimizer.zero_grad()
@@ -36,6 +36,8 @@ def train(dataloader, model, optimizer, device, in_projection=True):
         # compute loss as sum of two terms for likelihood-free inference
         loss_mse = F.mse_loss(y_pred.flatten(), data.y)
         loss_lfi = F.mse_loss((y_pred.flatten() - data.y), 10**logvar_pred.flatten())
+        # loss_mse = F.mse_loss(y_pred, data.y)
+        # loss_lfi = F.mse_loss((y_pred - data.y), 10**logvar_pred)
         loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
         loss.backward()
@@ -63,6 +65,8 @@ def validate(dataloader, model, device):
             # compute loss as sum of two terms for likelihood-free inference
             loss_mse = F.mse_loss(y_pred.flatten(), data.y)
             loss_lfi = F.mse_loss((y_pred.flatten() - data.y), 10**logvar_pred.flatten())
+            # loss_mse = F.mse_loss(y_pred, data.y)
+            # loss_lfi = F.mse_loss((y_pred - data.y), 10**logvar_pred)
             loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
             loss_total += loss.item()

@@ -8,7 +8,7 @@ seed = 42
 ROOT = Path(__file__).parents[1].resolve()
 tng_base_path = f"{ROOT}/illustris_data/TNG50-1/output"
 
-experiment = "predict_Mhalo" # mass accretion rate, versus smhm
+experiment = science_params["predict_output"]
 
 verbose = True
 plot_figures = True
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         test_frac=training_params["test_frac"],
         batch_size=training_params["batch_size"],
     )
-
+    
     # load model
     model = EdgePointGNN(
         node_features=node_features, 
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     for epoch in range(training_params["n_epochs"]):
         train_loss = train(train_loader, model, optimizer, device, in_projection=feature_params["in_projection"])
         valid_loss, valid_std, *_ = validate(valid_loader, model, device)
-        
+
         train_losses.append(train_loss)
         valid_losses.append(valid_loss)
 
@@ -95,13 +95,20 @@ if __name__ == "__main__":
     if plot_figures:
         import matplotlib.pyplot as plt
         h = config_params["h_reduced"]
+
         plt.figure(figsize=(4, 4), dpi=200)
-        plt.plot([10, 15], [10, 15], c='0.7', lw=2, zorder=1)
-        plt.scatter(p_test+10+h, y_test+10+h, s=5, edgecolors='none', c="#003f5c", zorder=3)
-        plt.xlabel("True $\\log(M_{\\rm halo}/[M_\\odot])$")
-        plt.ylabel("Predicted $\\log(M_{\\rm halo}/[M_\\odot])$")
-        plt.xlim(11, 14)
-        plt.ylim(11, 14)
+        plt.scatter(y_test, p_test, s=5, edgecolors='none', c="#003f5c", zorder=3)
+        # plt.xlabel("True $\\log(M_{\\rm halo}/[M_\\odot])$")
+        # plt.ylabel("Predicted $\\log(M_{\\rm halo}/[M_\\odot])$")
+        plt.title(experiment, fontsize=16)
+        plt.xlabel("True")
+        plt.ylabel("Predicted")
+        axis_min = np.min((*p_test, *y_test))
+        axis_max = np.max((*p_test, *y_test))
+        plt.plot([axis_min, axis_max], [axis_min, axis_max], c='0.7', lw=2, zorder=1)
+
+        plt.xlim(axis_min, axis_max)
+        plt.ylim(axis_min, axis_max)
         plt.tight_layout()
         plt.grid(alpha=0.15)
         plt.savefig(f"{ROOT}/results/{experiment}/results.png")

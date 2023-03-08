@@ -20,10 +20,10 @@ normalization_params = dict(
     norm_velocity=100., # note: use value of 1 if `use_central_galaxy_frame=True`
 )
 
-# predict outputs: M_acc_dyn, log_stellar_halo_mass_ratio, log_halo_mass
+# predict outputs: M_acc_dyn, log_stellar_halo_mass_ratio, log_halo_mass, concentration, a50, subhalo_vmax
 science_params = dict(
-    minimum_log_stellar_mass=8.,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
-    predict_output="log_halo_mass",     # predict log mass accretion in dynamical time (https://arxiv.org/abs/1703.09712)
+    minimum_log_stellar_mass=7.5,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
+    predict_output="concentration",     
 )
 
 feature_params = dict(
@@ -71,14 +71,15 @@ def load_data(
     use_stellarhalfmassradius=True, 
     use_velocity=True, 
     use_only_positions=False, 
-    in_projection=True
+    in_projection=True,
+    science_params=science_params,
 ):
     """Loads Pandas DataFrame of halos, subhalos, and supplementary data in a given file."""
 
     # see https://www.tng-project.org/data/docs/specifications/
     subhalo_fields = [
         "SubhaloPos", "SubhaloMassType", "SubhaloLenType", "SubhaloHalfmassRadType", 
-        "SubhaloVel", "SubhaloGrNr", "SubhaloFlag"
+        "SubhaloVel", "SubhaloVmax", "SubhaloGrNr", "SubhaloFlag"
     ]
     subhalos = il.groupcat.loadSubhalos(tng_base_path, snapshot, fields=subhalo_fields) 
 
@@ -90,6 +91,7 @@ def load_data(
     subhalo_n_stellar_particles = subhalos["SubhaloLenType"][:,4]
     subhalo_stellarhalfmassradius = subhalos["SubhaloHalfmassRadType"][:,4] / normalization_params["norm_half_mass_radius"]
     subhalo_vel = subhalos["SubhaloVel"][:] / normalization_params["norm_velocity"]
+    subhalo_vmax = subhalos["SubhaloVmax"][:] / normalization_params["norm_velocity"]
     subhalo_flag = subhalos["SubhaloFlag"][:]
     halo_id = subhalos["SubhaloGrNr"][:]
 
@@ -98,14 +100,17 @@ def load_data(
     group_pos = halos["GroupPos"][:] / config_params["boxsize"]
     group_vel = halos["GroupVel"][:] / normalization_params["norm_velocity"]
 
-    # get accretion history
+    # get accretion history and halo shape
     with h5py.File(f"{tng_base_path}/../postprocessing/halo_structure/halo_structure_099.hdf5", "r") as halo_structure:
         M_acc_dyn = halo_structure["M_acc_dyn"][:]
+        concentration = halo_structure["c200c"][:].clip(1e-3, 1e2)
+        a50 = halo_structure["a_form"][:]
+        group_flag = halo_structure["GroupFlag"][:]
 
     # get subhalos/galaxies      
     subhalos = pd.DataFrame(
-        np.column_stack([halo_id, subhalo_flag, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius]), 
-        columns=['halo_id', 'subhalo_flag', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius'],
+        np.column_stack([halo_id, subhalo_flag, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius, subhalo_vmax]), 
+        columns=['halo_id', 'subhalo_flag', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius', 'subhalo_vmax'],
     )
     subhalos = subhalos[subhalos["subhalo_flag"] != 0].copy()
     subhalos['halo_id'] = subhalos['halo_id'].astype(int)
@@ -120,10 +125,16 @@ def load_data(
 
     # get central halos (and only keep those with positive mass)
     halos = pd.DataFrame(
-        np.column_stack((np.arange(len(halo_mass)), group_pos, group_vel, halo_mass, halo_primarysubhalo, M_acc_dyn)),
-        columns=['halo_id', 'halo_x', 'halo_y', 'halo_z', 'halo_vx', 'halo_vy', 'halo_vz', 'halo_mass', 'halo_primarysubhalo', "M_acc_dyn"]
+        np.column_stack((np.arange(len(halo_mass)), group_pos, group_vel, halo_mass, halo_primarysubhalo, M_acc_dyn, a50, concentration, group_flag)),
+        columns=['halo_id', 'halo_x', 'halo_y', 'halo_z', 'halo_vx', 'halo_vy', 'halo_vz', 'halo_mass', 'halo_primarysubhalo', "M_acc_dyn", "a50", "concentration", "group_flag"]
     )
-    halos = halos[(halos["halo_mass"] > 0) & (halos["M_acc_dyn"].notna())].copy()
+    halos = halos[
+        (halos["group_flag"] != 0) 
+        & (halos["halo_mass"] > 0) 
+        & halos["M_acc_dyn"].notna()
+        & halos["a50"].notna()
+    ].copy()
+    halos.drop("group_flag", axis=1, inplace=True)
     halos["halo_id"] = halos['halo_id'].astype(int)
     halos["halo_logmass"] = np.log10(halos["halo_mass"])
 
@@ -149,7 +160,7 @@ def load_data(
 
     return df
 
-def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_only_positions=False, in_projection=True):
+def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_only_positions=False, in_projection=True, science_params=science_params):
     """Iterate through a dataframe and create a PyG Data object"""
 
     dataset = []
@@ -208,12 +219,19 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
             u[0, 1] = np.log10(np.sum(10.**subs["subhalo_logstellarmass"]))
 
         # create a new feature, which is the stellar mass to halo mass ratio 
-        if science_params["predict_output"] == "log_stellar_halo_mass_ratio":
-            y = torch.tensor((subs["subhalo_logstellarmass"] - subs["halo_logmass"]).iloc[0], dtype=torch.float32)
-        elif science_params["predict_output"] == "log_halo_mass":
-            y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
-        elif science_params["predict_output"] == "M_acc_dyn":
-            y = torch.tensor(subs[["M_acc_dyn"]].values[0], dtype=torch.float32)
+        match science_params["predict_output"]:
+            case "log_stellar_halo_mass_ratio":
+                y = torch.tensor((subs["subhalo_logstellarmass"] - subs["halo_logmass"]).iloc[0], dtype=torch.float32)
+            case "log_halo_mass":
+                y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
+            case "M_acc_dyn":
+                y = torch.log10(torch.tensor(subs[["M_acc_dyn"]].values[0], dtype=torch.float32))
+            case "concentration":
+                y = torch.log10(torch.tensor(subs[["concentration"]].values[0], dtype=torch.float32))
+            case "a50":
+                y = torch.log10(torch.tensor(subs[["a50"]].values[0], dtype=torch.float32))
+            case "vmax":
+                y = torch.log10(torch.tensor(subs[["subhalo_vmax"]].values[0], dtype=torch.float32))
             
         # create pyg dataset
         graph = Data(

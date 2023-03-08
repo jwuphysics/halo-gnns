@@ -9,7 +9,7 @@ from torch_cluster import knn_graph, radius_graph
 from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min
 
 model_params = dict(
-    k_nn=1.,
+    k_nn=100.,
     n_layers=1,  # currently doesn't work for more than 1 layer
     n_hidden=128,
     n_latent=96,
@@ -20,7 +20,7 @@ class EdgePointLayer(MessagePassing):
     """Adapted from https://github.com/PabloVD/HaloGraphNet.
     Initialized with `sum` aggregation, although `max` or others are possible.
     """
-    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=True):
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
         super(EdgePointLayer, self).__init__(aggr)
 
         # Initialization of the MLP:
@@ -28,8 +28,10 @@ class EdgePointLayer(MessagePassing):
         # dimensionality plus point dimensionality (=3, or 1 if only modulus is used).
         self.mlp = nn.Sequential(
             nn.Linear(2 * in_channels - 2, mid_channels, bias=True),
+            nn.LayerNorm(mid_channels),
             nn.ReLU(),
             nn.Linear(mid_channels, mid_channels, bias=True),
+            nn.LayerNorm(mid_channels),
             nn.ReLU(),
             nn.Linear(mid_channels, out_channels, bias=True),
         )
@@ -65,16 +67,19 @@ class EdgePointGNN(nn.Module):
         super(EdgePointGNN, self).__init__()
 
         in_channels = node_features
-
-        layers = [
-            EdgePointLayer(in_channels, hidden_channels, latent_channels) for _ in range(n_layers)
-        ]
-
+        
+        layers = [EdgePointLayer(in_channels, hidden_channels, latent_channels)]
+        for _ in range(n_layers-1):
+            layers += [EdgePointLayer(latent_channels, hidden_channels, latent_channels)]
+        
         self.layers = nn.ModuleList(layers)
         self.fc = nn.Sequential(
             nn.Linear(latent_channels * 3 + 2, latent_channels, bias=True),
+            # nn.Linear(latent_channels, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
             nn.ReLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
             nn.ReLU(),
             nn.Linear(latent_channels, 2, bias=True)
         )
@@ -103,4 +108,22 @@ class EdgePointGNN(nn.Module):
 
         # final fully connected layer
         return self.fc(self.pooled)
+
+    
+    # def forward(self, data):
+    #     x, pos, batch, u = data.x, data.pos, data.batch, data.u
+
+    #     # determine edges by getting neighbors within radius defined by `k_nn`
+    #     edge_index = radius_graph(pos, r=self.k_nn, batch=batch, loop=self.loop)
+
+    #     for layer in self.layers:
+    #         x = layer(x, edge_index=edge_index)
         
+    #     self.h = x
+    #     x = x.relu()
+            
+    #     # return just central embedding
+    #     # _, counts = torch.unique(batch, return_counts=True)
+    #     # idx = torch.cumsum(counts, dim=0) - counts[0]
+    #     # return self.fc(x[idx, :])
+    #     return self.fc(x)
