@@ -80,8 +80,8 @@ class EdgePointGNN(nn.Module):
         self.use_global_pooling = use_global_pooling
         self.fc = nn.Sequential(
             (
-                nn.Linear(latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos 
-                else nn.Linear(latent_channels * 3 + 2, latent_channels, bias=True)
+                nn.Linear(latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos
+                else nn.Linear(latent_channels * 3, latent_channels, bias=True)
             ),
             nn.LayerNorm(latent_channels),
             nn.ReLU(),
@@ -96,24 +96,22 @@ class EdgePointGNN(nn.Module):
         self.h = 0.
     
     def forward(self, data):
-        x, pos, batch, u = data.x, data.pos, data.batch, data.u
-
+        
         # determine edges by getting neighbors within radius defined by `k_nn`
-        edge_index = radius_graph(pos, r=self.k_nn, batch=batch, loop=self.loop)
+        edge_index = radius_graph(data.pos, r=self.k_nn, batch=data.batch, loop=self.loop)
 
         for layer in self.layers:
-            x = layer(x, edge_index=edge_index)
+            x = layer(data.x, edge_index=edge_index)
         
         self.h = x
         x = x.relu()
         
         if self.use_global_pooling:
-            # use all the pooling! (and also the extra global features `u`)
-            addpool = global_add_pool(x, batch)
-            meanpool = global_mean_pool(x, batch)
-            maxpool = global_max_pool(x, batch)
-            self.pooled = torch.cat([addpool, meanpool, maxpool, u], dim=1)
-
+            # use all the pooling! forget `u` variable..
+            addpool = global_add_pool(x, data.batch)
+            meanpool = global_mean_pool(x, data.batch)
+            maxpool = global_max_pool(x, data.batch)
+            self.pooled = torch.cat([addpool, meanpool, maxpool], dim=1)
             # final fully connected layer
             return self.fc(self.pooled)
         else:
