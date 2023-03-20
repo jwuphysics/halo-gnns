@@ -23,20 +23,20 @@ class EdgePointLayer(MessagePassing):
     """Adapted from https://github.com/PabloVD/HaloGraphNet.
     Initialized with `sum` aggregation, although `max` or others are possible.
     """
-    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False, use_bias=True):
         super(EdgePointLayer, self).__init__(aggr)
 
         # Initialization of the MLP:
         # Here, the number of input features correspond to the hidden node
         # dimensionality plus point dimensionality (=3, or 1 if only modulus is used).
         self.mlp = nn.Sequential(
-            nn.Linear(2 * in_channels - 2, mid_channels, bias=True),
+            nn.Linear(2 * in_channels - 2, mid_channels, bias=use_bias),
             nn.LayerNorm(mid_channels),
             nn.ReLU(),
-            nn.Linear(mid_channels, mid_channels, bias=True),
+            nn.Linear(mid_channels, mid_channels, bias=use_bias),
             nn.LayerNorm(mid_channels),
             nn.ReLU(),
-            nn.Linear(mid_channels, out_channels, bias=True),
+            nn.Linear(mid_channels, out_channels, bias=use_bias),
         )
 
         self.messages = 0.
@@ -66,12 +66,12 @@ class EdgePointLayer(MessagePassing):
         return self.messages
 
 class EdgePointGNN(nn.Module):
-    def __init__(self, node_features, n_layers, k_nn, hidden_channels=128, latent_channels=64, n_out=2, loop=False, estimate_all_subhalos=False, use_global_pooling=True):
+    def __init__(self, node_features, n_layers, k_nn, hidden_channels=128, latent_channels=64, n_out=2, loop=False, estimate_all_subhalos=False, use_global_pooling=True, use_bias=True):
         super(EdgePointGNN, self).__init__()
 
         in_channels = node_features
         
-        layers = [EdgePointLayer(in_channels, hidden_channels, latent_channels)]
+        layers = [EdgePointLayer(in_channels, hidden_channels, latent_channels, use_bias=use_bias)]
         for _ in range(n_layers-1):
             layers += [EdgePointLayer(latent_channels, hidden_channels, latent_channels)]
         self.n_out = n_out
@@ -80,15 +80,15 @@ class EdgePointGNN(nn.Module):
         self.use_global_pooling = use_global_pooling
         self.fc = nn.Sequential(
             (
-                nn.Linear(latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos 
-                else nn.Linear(latent_channels * 3 + 2, latent_channels, bias=True)
+                nn.Linear(latent_channels, latent_channels, bias=use_bias) if self.estimate_all_subhalos 
+                else nn.Linear(latent_channels * 3 + 2, latent_channels, bias=use_bias)
             ),
             nn.LayerNorm(latent_channels),
             nn.ReLU(),
-            nn.Linear(latent_channels, latent_channels, bias=True),
+            nn.Linear(latent_channels, latent_channels, bias=use_bias),
             nn.LayerNorm(latent_channels),
             nn.ReLU(),
-            nn.Linear(latent_channels, 2 * n_out, bias=True)
+            nn.Linear(latent_channels, 2 * n_out, bias=use_bias)
         )
         self.k_nn = k_nn
         self.loop = loop

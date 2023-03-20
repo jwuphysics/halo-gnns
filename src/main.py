@@ -32,9 +32,9 @@ if __name__ == "__main__":
     dataset, n_subhalos = generate_dataset(
         df,
         use_velocity=feature_params["use_velocity"],
-        use_central_galaxy_frame=feature_params["use_central_galaxy_frame"],
         use_only_positions=feature_params["use_only_positions"],
-        in_projection=feature_params["in_projection"]
+        in_projection=feature_params["in_projection"],
+        use_stellarhalfmassradius=feature_params["use_stellarhalfmassradius"],
     )
         
     node_features = dataset[0].x.shape[1]

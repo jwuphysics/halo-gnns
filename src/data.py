@@ -17,7 +17,7 @@ config_params = dict(
 normalization_params = dict(
     minimum_n_star_particles=10., # min star particles to be considered a galaxy
     norm_half_mass_radius=8., 
-    norm_velocity=100., # note: use value of 1 if `use_central_galaxy_frame=True`
+    norm_velocity=100., 
 )
 
 # predict outputs: log_halo_mass, subhalo_vmax, both
@@ -27,10 +27,9 @@ science_params = dict(
 )
 
 feature_params = dict(
-    use_stellarhalfmassradius=True,
+    use_stellarhalfmassradius=False,
     use_velocity=True,
     use_only_positions=False,
-    use_central_galaxy_frame=False, # otherwise use center of mass frame
     in_projection=True, # only use projected positions and radial velocity
 )
 
@@ -150,7 +149,7 @@ def load_data(
 
     return df
 
-def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_only_positions=False, in_projection=True, science_params=science_params):
+def generate_dataset(df, use_velocity=True, use_only_positions=False, in_projection=True, use_stellarhalfmassradius=True, science_params=science_params):
     """Iterate through a dataframe and create a PyG Data object"""
 
     dataset = []
@@ -162,16 +161,10 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
         if subs.shape[0] <= 1: 
             continue
 
-        if use_central_galaxy_frame:
-            # shift positions and velocities to central galaxy rest frame
-            for x in ['x', 'y', 'z', 'vx', 'vy', 'vz']:
-                if x in subs.columns:
-                    subs[f'subhalo_{x}'] -= subs.iloc[0][f'subhalo_{x}']
-        else:
-            # shift positions and velocities to halo rest frame
-            for x in ['x', 'y', 'z', 'vx', 'vy', 'vz']:
-                if x in subs.columns:
-                    subs[f'subhalo_{x}'] -= subs[f'halo_{x}']
+        # shift positions and velocities to halo rest frame
+        for x in ['x', 'y', 'z', 'vx', 'vy', 'vz']:
+            if x in subs.columns:
+                subs[f'subhalo_{x}'] -= subs[f'halo_{x}']
 
         # correct for periodic boundary conditions
         if in_projection:
@@ -185,22 +178,31 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
 
         # normalize velocities if using them
         if use_velocity:
-            if use_central_galaxy_frame:
-                subhalo_vel = np.log10(1.+np.sqrt(np.sum(subs[['subhalo_vx', 'subhalo_vy', 'subhalo_vz']].values**2., 1)))
-            else:
-                if in_projection:
-                    subhalo_vel = np.log10(np.sqrt(np.sum(subs[['subhalo_vz']].values**2., 1)))
-                else:  
-                    subhalo_vel = np.log10(np.sqrt(np.sum(subs[['subhalo_vx', 'subhalo_vy', 'subhalo_vz']].values**2., 1)))
             if in_projection:
-                features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
+                subhalo_vel = np.log10(np.sqrt(np.sum(subs[['subhalo_vz']].values**2., 1)))
+            else:  
+                subhalo_vel = np.log10(np.sqrt(np.sum(subs[['subhalo_vx', 'subhalo_vy', 'subhalo_vz']].values**2., 1)))
+            if in_projection:
+                if not use_stellarhalfmassradius:
+                    features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass']].values, subhalo_vel))
+                else:
+                    features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
             else:
-                features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
+                if not use_stellarhalfmassradius:
+                    features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass']].values, subhalo_vel))
+                else:
+                    features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
         else:
             if in_projection:
-                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values
+                if not use_stellarhalfmassradius:
+                    features = subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass']].values
+                else:
+                    features = subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values
             else:
-                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values
+                if not use_stellarhalfmassradius:
+                    features = subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass']].values
+                else:
+                    features = subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values
 
         # global features: N_subhalos, total stellar mass, 
         u = np.zeros((1,2), dtype=np.float32)
