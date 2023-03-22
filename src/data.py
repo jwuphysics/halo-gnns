@@ -89,6 +89,7 @@ def load_data(
     subhalo_stellarmass = subhalos["SubhaloMassType"][:,4]
     subhalo_n_stellar_particles = subhalos["SubhaloLenType"][:,4]
     subhalo_stellarhalfmassradius = subhalos["SubhaloHalfmassRadType"][:,4] / normalization_params["norm_half_mass_radius"]
+    subhalo_halomass = subhalos["SubhaloMassType"][:,1]
     subhalo_vel = subhalos["SubhaloVel"][:] / normalization_params["norm_velocity"]
     subhalo_vmax = subhalos["SubhaloVmax"][:] / normalization_params["norm_velocity"]
     subhalo_flag = subhalos["SubhaloFlag"][:]
@@ -101,19 +102,19 @@ def load_data(
 
     # get subhalos/galaxies      
     subhalos = pd.DataFrame(
-        np.column_stack([halo_id, subhalo_flag, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius, subhalo_vmax]), 
-        columns=['halo_id', 'subhalo_flag', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius', 'subhalo_vmax'],
+        np.column_stack([halo_id, subhalo_flag, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius, subhalo_halomass, subhalo_vmax]), 
+        columns=['halo_id', 'subhalo_flag', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius', 'subhalo_halomass', 'subhalo_vmax'],
     )
-    subhalos = subhalos[subhalos["subhalo_flag"] != 0].copy()
+    subhalos = subhalos[(subhalos["subhalo_flag"] != 0) & (subhalos["subhalo_halomass"] > 0)].copy()
     subhalos['halo_id'] = subhalos['halo_id'].astype(int)
     subhalos['subhalo_id'] = subhalos['subhalo_id'].astype(int)
 
     subhalos.drop("subhalo_flag", axis=1, inplace=True)
-
+    
     # impose stellar mass and particle cuts
     subhalos = subhalos[subhalos["subhalo_n_stellar_particles"] > normalization_params["minimum_n_star_particles"]].copy()
     subhalos["subhalo_logstellarmass"] = np.log10(subhalos["subhalo_stellarmass"])
-    subhalos = subhalos[subhalos["subhalo_logstellarmass"] + 10 > science_params["minimum_log_stellar_mass"]].copy()
+    subhalos = subhalos[subhalos["subhalo_logstellarmass"] + 10 - config_params["h_reduced"] > science_params["minimum_log_stellar_mass"]].copy()
 
     # get central halos (and only keep those with positive mass)
     halos = pd.DataFrame(
@@ -210,20 +211,19 @@ def generate_dataset(df, use_velocity=True, use_only_positions=False, in_project
         if not use_only_positions:
             u[0, 1] = np.log10(np.sum(10.**subs["subhalo_logstellarmass"]))
 
-        # note that this only works if we predict a single output...
         match science_params["predict_output"]:
             case "log_halo_mass":
-                y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
+                y = torch.tensor(subs[["subhalo_halomass"]].values, dtype=torch.float32)
             case "vmax":
-                y = torch.log10(torch.tensor(subs[["subhalo_vmax"]].values[0], dtype=torch.float32))
+                y = torch.log10(torch.tensor(subs[["subhalo_vmax"]].values, dtype=torch.float32))
             case "both":
                 y = torch.from_numpy(
                     np.array([
-                        subs[["halo_logmass"]].values[0], 
-                        subs[["subhalo_vmax"]].apply(np.log10).values[0]
+                        subs["subhalo_halomass"].apply(np.log10).values, 
+                        subs["subhalo_vmax"].apply(np.log10).values
                     ], dtype=np.float32)
-                ).reshape(-1, 2)
-            
+                ).T.reshape(-1, 2)
+
         # create pyg dataset
         graph = Data(
             x=torch.tensor(features, dtype=torch.float32), 

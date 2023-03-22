@@ -80,7 +80,7 @@ class EdgePointGNN(nn.Module):
         self.use_global_pooling = use_global_pooling
         self.fc = nn.Sequential(
             (
-                nn.Linear(latent_channels, latent_channels, bias=use_bias) if self.estimate_all_subhalos 
+                nn.Linear(latent_channels, latent_channels, bias=use_bias) if self.estimate_all_subhalos
                 else nn.Linear(latent_channels * 3 + 2, latent_channels, bias=use_bias)
             ),
             nn.LayerNorm(latent_channels),
@@ -107,7 +107,7 @@ class EdgePointGNN(nn.Module):
         self.h = x
         x = x.relu()
         
-        if self.use_global_pooling:
+        if not self.estimate_all_subhalos:
             # use all the pooling! (and also the extra global features `u`)
             addpool = global_add_pool(x, batch)
             meanpool = global_mean_pool(x, batch)
