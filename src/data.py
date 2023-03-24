@@ -23,6 +23,7 @@ normalization_params = dict(
 # predict outputs: log_halo_mass, subhalo_vmax, both
 science_params = dict(
     minimum_log_stellar_mass=7.5,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
+    minimum_log_halo_mass=8.0,
     predict_output="both",     
 )
 
@@ -111,10 +112,11 @@ def load_data(
 
     subhalos.drop("subhalo_flag", axis=1, inplace=True)
     
-    # impose stellar mass and particle cuts
+    # impose stellar mass, halo mass, and particle cuts
     subhalos = subhalos[subhalos["subhalo_n_stellar_particles"] > normalization_params["minimum_n_star_particles"]].copy()
     subhalos["subhalo_logstellarmass"] = np.log10(subhalos["subhalo_stellarmass"])
-    subhalos = subhalos[subhalos["subhalo_logstellarmass"] + 10 - config_params["h_reduced"] > science_params["minimum_log_stellar_mass"]].copy()
+    subhalos = subhalos[(subhalos["subhalo_logstellarmass"] + 10 - config_params["h_reduced"] > science_params["minimum_log_stellar_mass"]) 
+        & (subhalos["subhalo_halomass"].apply(np.log10) + 10 - config_params["h_reduced"] > science_params["minimum_log_halo_mass"])].copy()
 
     # get central halos (and only keep those with positive mass)
     halos = pd.DataFrame(
@@ -213,9 +215,9 @@ def generate_dataset(df, use_velocity=True, use_only_positions=False, in_project
 
         match science_params["predict_output"]:
             case "log_halo_mass":
-                y = torch.tensor(subs[["subhalo_halomass"]].values, dtype=torch.float32)
+                y = torch.tensor(subs[["subhalo_halomass"]].apply(np.log10).values, dtype=torch.float32)
             case "vmax":
-                y = torch.log10(torch.tensor(subs[["subhalo_vmax"]].values, dtype=torch.float32))
+                y = torch.log10(torch.tensor(subs[["subhalo_vmax"]].apply(np.log10).values, dtype=torch.float32))
             case "both":
                 y = torch.from_numpy(
                     np.array([
