@@ -141,7 +141,7 @@ def make_webs(
                 zmask = np.logical_and(pos[:,2]>zlims[0],pos[:,2]<zlims[1])
                 mask = np.logical_and(zmask, np.logical_and(xmask, ymask))
 
-                df = subhalos.iloc[mask]
+                df = subhalos.iloc[mask].copy()
                 df.reset_index(drop=True)
 
                 # remove extraneous columns

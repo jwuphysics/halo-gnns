@@ -12,21 +12,33 @@ training_params = dict(
     test_frac=0.15,  # fraction of dataset for testing
 )
 
-def train(dataloader, model, optimizer, device, in_projection=True):
+def train(dataloader, model, optimizer, device, in_projection=True, augment=True):
     model.train()
 
     loss_total = 0
     for data in dataloader:
 
-        # random rotation for data augmentation
-        if in_projection:
-            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)[:2, :2]
-            data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
-            data.x[:, :2] = (R @ data.x[:, :2].unsqueeze(-1)).squeeze()
-        else:
-            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
-            data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
-            data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
+        
+        if augment:
+            # random rotation for data augmentation
+            if in_projection:
+                R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)[:2, :2]
+                data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
+                data.x[:, :2] = (R @ data.x[:, :2].unsqueeze(-1)).squeeze()
+            else:
+                R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
+                data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
+                data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
+
+                # also augment velocities
+                data.x[:, 3:6] = (R @ data.x[:, 3:6].unsqueeze(-1)).squeeze()
+
+            # add random noise
+            # data_x_scatter = torch.std(data.x, dim=0)
+            # data_y_scatter = torch.std(data.y, dim=0)
+            # assert (data_x_scatter.shape[0] == len(data.x[0]))
+            # data.x += 1e-4 * data_x_scatter
+            # data.y += 1e-4 * data_y_scatter
         
         data.to(device)
 

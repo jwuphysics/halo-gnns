@@ -9,7 +9,7 @@ from torch_cluster import knn_graph, radius_graph
 from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min
 
 model_params = dict(
-    k_nn=100.,
+    D_link=100.,
     n_layers=1,
     n_hidden=128,
     n_latent=96,
@@ -66,7 +66,7 @@ class EdgePointLayer(MessagePassing):
         return self.messages
 
 class EdgePointGNN(nn.Module):
-    def __init__(self, node_features, n_layers, k_nn, hidden_channels=128, latent_channels=64, n_out=2, loop=False, estimate_all_subhalos=False, use_global_pooling=True):
+    def __init__(self, node_features, n_layers, D_link, hidden_channels=128, latent_channels=64, n_out=2, loop=False, estimate_all_subhalos=False, use_global_pooling=True):
         super(EdgePointGNN, self).__init__()
 
         in_channels = node_features
@@ -90,15 +90,15 @@ class EdgePointGNN(nn.Module):
             nn.ReLU(),
             nn.Linear(latent_channels, 2 * n_out, bias=True)
         )
-        self.k_nn = k_nn
+        self.D_link = D_link
         self.loop = loop
         self.pooled = 0.
         self.h = 0.
     
     def forward(self, data):
         
-        # determine edges by getting neighbors within radius defined by `k_nn`
-        edge_index = radius_graph(data.pos, r=self.k_nn, batch=data.batch, loop=self.loop)
+        # determine edges by getting neighbors within radius defined by `D_link`
+        edge_index = radius_graph(data.pos, r=self.D_link, batch=data.batch, loop=self.loop)
 
         for layer in self.layers:
             x = layer(data.x, edge_index=edge_index)
