@@ -12,7 +12,8 @@ training_params = dict(
     test_frac=0.15,  # fraction of dataset for testing
 )
 
-def train(dataloader, model, optimizer, device, in_projection=True, augment=True):
+def train(dataloader, model, optimizer, device, augment=True, in_projection=False, no_positions=False, no_velocities=False):
+    """Assumes that data object in dataloader has 8 columns: x,y,z, vx,vy,vz, Mh, Vmax"""
     model.train()
 
     loss_total = 0
@@ -21,15 +22,14 @@ def train(dataloader, model, optimizer, device, in_projection=True, augment=True
         
         if augment:
             # random rotation for data augmentation
+            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
             if in_projection:
-                R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)[:2, :2]
-                data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
-                data.x[:, :2] = (R @ data.x[:, :2].unsqueeze(-1)).squeeze()
+                data.pos = (R[:2, :2] @ data.pos.unsqueeze(-1)).squeeze()
+                data.x[:, :2] = (R[:2, :2] @ data.x[:, :2].unsqueeze(-1)).squeeze()
             else:
-                R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
                 data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
                 data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
-
+            
                 # also augment velocities
                 data.x[:, 3:6] = (R @ data.x[:, 3:6].unsqueeze(-1)).squeeze()
 
@@ -39,7 +39,7 @@ def train(dataloader, model, optimizer, device, in_projection=True, augment=True
             # assert (data_x_scatter.shape[0] == len(data.x[0]))
             # data.x += 1e-4 * data_x_scatter
             # data.y += 1e-4 * data_y_scatter
-        
+
         data.to(device)
 
         optimizer.zero_grad()
@@ -62,7 +62,7 @@ def train(dataloader, model, optimizer, device, in_projection=True, augment=True
 
     return loss_total / len(dataloader)
 
-def validate(dataloader, model, device):
+def validate(dataloader, model, device, in_projection=False, no_velocities=False, no_positions=False):
     model.eval()
 
     uncertainties = []
@@ -97,6 +97,7 @@ def validate(dataloader, model, device):
     y_preds = np.concatenate(y_preds)
     y_trues = np.array(y_trues)
     logvar_preds = np.concatenate(logvar_preds)
+    uncertainties = np.concatenate(uncertainties)
 
     return (
         loss_total / len(dataloader),

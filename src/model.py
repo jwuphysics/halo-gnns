@@ -23,7 +23,7 @@ class EdgePointLayer(MessagePassing):
     """Adapted from https://github.com/PabloVD/HaloGraphNet.
     Initialized with `sum` aggregation, although `max` or others are possible.
     """
-    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='max', use_mod=False):
         super(EdgePointLayer, self).__init__(aggr)
 
         # Initialization of the MLP:
@@ -66,14 +66,14 @@ class EdgePointLayer(MessagePassing):
         return self.messages
 
 class EdgePointGNN(nn.Module):
-    def __init__(self, node_features, n_layers, D_link, hidden_channels=128, latent_channels=64, n_out=2, loop=False, estimate_all_subhalos=False, use_global_pooling=True):
+    def __init__(self, node_features, n_layers, D_link, hidden_channels=128, aggr="sum", latent_channels=64, n_out=2, loop=False, estimate_all_subhalos=False, use_global_pooling=True):
         super(EdgePointGNN, self).__init__()
 
         in_channels = node_features
         
-        layers = [EdgePointLayer(in_channels, hidden_channels, latent_channels)]
+        layers = [EdgePointLayer(in_channels, hidden_channels, latent_channels, aggr=aggr)]
         for _ in range(n_layers-1):
-            layers += [EdgePointLayer(latent_channels, hidden_channels, latent_channels)]
+            layers += [EdgePointLayer(latent_channels, hidden_channels, latent_channels, aggr=aggr)]
         self.n_out = n_out
         self.layers = nn.ModuleList(layers)
         self.estimate_all_subhalos = estimate_all_subhalos
