@@ -23,7 +23,7 @@ class EdgePointLayer(MessagePassing):
     """Adapted from https://github.com/PabloVD/HaloGraphNet.
     Initialized with `sum` aggregation, although `max` or others are possible.
     """
-    def __init__(self, in_channels, mid_channels, out_channels, aggr='max', use_mod=False):
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
         super(EdgePointLayer, self).__init__(aggr)
 
         # Initialization of the MLP:
@@ -66,7 +66,7 @@ class EdgePointLayer(MessagePassing):
         return self.messages
 
 class EdgePointGNN(nn.Module):
-    def __init__(self, node_features, n_layers, D_link, hidden_channels=128, aggr="sum", latent_channels=64, n_out=2, loop=False, estimate_all_subhalos=False, use_global_pooling=True):
+    def __init__(self, node_features, n_layers, D_link, hidden_channels=128, aggr="sum", latent_channels=64, n_out=2, loop=True, estimate_all_subhalos=False, use_global_pooling=True):
         super(EdgePointGNN, self).__init__()
 
         in_channels = node_features
@@ -78,9 +78,11 @@ class EdgePointGNN(nn.Module):
         self.layers = nn.ModuleList(layers)
         self.estimate_all_subhalos = estimate_all_subhalos
         self.use_global_pooling = use_global_pooling
+
+        n_pool = (len(aggr) if isinstance(aggr, list) else 1) 
         self.fc = nn.Sequential(
             (
-                nn.Linear(latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos
+                nn.Linear(n_pool * latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos
                 else nn.Linear(latent_channels * 3, latent_channels, bias=True)
             ),
             nn.LayerNorm(latent_channels),
@@ -105,19 +107,18 @@ class EdgePointGNN(nn.Module):
         
         self.h = x
         x = x.relu()
-        
-        if self.use_global_pooling:
-            # use all the pooling! forget `u` variable..
-            addpool = global_add_pool(x, data.batch)
-            meanpool = global_mean_pool(x, data.batch)
-            maxpool = global_max_pool(x, data.batch)
-            self.pooled = torch.cat([addpool, meanpool, maxpool], dim=1)
-            # final fully connected layer
-            return self.fc(self.pooled)
+        if self.estimate_all_subhalos:
+            # returns all of the subhalos
+            return self.fc(x)
         else:
-            if self.estimate_all_subhalos:
-                # returns all of the subhalos
-                return self.fc(x)
+            if self.use_global_pooling:
+                # use all the pooling! forget `u` variable..
+                addpool = global_add_pool(x, data.batch)
+                meanpool = global_mean_pool(x, data.batch)
+                maxpool = global_max_pool(x, data.batch)
+                self.pooled = torch.cat([addpool, meanpool, maxpool], dim=1)
+                # final fully connected layer
+                return self.fc(self.pooled)
             else:
                 # retuns just the central subhalo
                 _, counts = torch.unique(batch, return_counts=True)

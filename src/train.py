@@ -34,11 +34,11 @@ def train(dataloader, model, optimizer, device, augment=True, in_projection=Fals
                 data.x[:, 3:6] = (R @ data.x[:, 3:6].unsqueeze(-1)).squeeze()
 
             # add random noise
-            # data_x_scatter = torch.std(data.x, dim=0)
-            # data_y_scatter = torch.std(data.y, dim=0)
-            # assert (data_x_scatter.shape[0] == len(data.x[0]))
-            # data.x += 1e-4 * data_x_scatter
-            # data.y += 1e-4 * data_y_scatter
+            data_x_scatter = torch.std(data.x, dim=0)
+            data_y_scatter = torch.std(data.y, dim=0)
+            assert (data_x_scatter.shape[0] == len(data.x[0]))
+            data.x += 1e-5 * data_x_scatter
+            data.y += 1e-5 * data_y_scatter
 
         data.to(device)
 
@@ -50,10 +50,10 @@ def train(dataloader, model, optimizer, device, augment=True, in_projection=Fals
         # compute loss as sum of two terms for likelihood-free inference
         if model.estimate_all_subhalos or (model.n_out > 1):
             loss_mse = F.mse_loss(y_pred, data.y)
-            loss_lfi = F.mse_loss((y_pred - data.y), 10**logvar_pred)
+            loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
         else:
             loss_mse = F.mse_loss(y_pred.flatten(), data.y)
-            loss_lfi = F.mse_loss((y_pred.flatten() - data.y), 10**logvar_pred.flatten())
+            loss_lfi = F.mse_loss((y_pred.flatten() - data.y)**2, 10**logvar_pred.flatten())
         loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
         loss.backward()
@@ -83,10 +83,10 @@ def validate(dataloader, model, device, in_projection=False, no_velocities=False
             # compute loss as sum of two terms for likelihood-free inference
             if model.estimate_all_subhalos or (model.n_out > 1):
                 loss_mse = F.mse_loss(y_pred, data.y)
-                loss_lfi = F.mse_loss((y_pred - data.y), 10**logvar_pred)
+                loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
             else:
                 loss_mse = F.mse_loss(y_pred.flatten(), data.y)
-                loss_lfi = F.mse_loss((y_pred.flatten() - data.y), 10**logvar_pred.flatten())
+                loss_lfi = F.mse_loss((y_pred.flatten() - data.y)**2, 10**logvar_pred.flatten())
             loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
             loss_total += loss.item()
