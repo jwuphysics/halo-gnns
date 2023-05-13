@@ -34,7 +34,7 @@ c0, c1, c2, c3, c4 = '#003f5c', '#58508d', '#bc5090', '#ff6361', '#ffa600'
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ### params for generating data products, visualizations, etc.
-recompile_data = True
+recompile_data = False
 retrain = True
 revalidate = True
 make_plots = True
@@ -465,7 +465,7 @@ def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots
         "p_RF": p_log_Mhalo_rf,
         p_gnn_key: p_log_Mhalo
     })
-
+    proj_str = "-projected" if in_projection else ""
     df.to_csv(f"{results_path}/validation{proj_str}-fold{k+1}.csv", index=False)
      
 def combine_results(split=6, centrals=None, results_path=None):
