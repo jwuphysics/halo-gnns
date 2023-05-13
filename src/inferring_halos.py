@@ -428,7 +428,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
     if save_models:
         torch.save(
             model.state_dict(),
-            f"{results_path}/EdgePointGNN-link{r_link}-hidden{n_hidden}-latent{n_latent}-selfloops{int(use_loops)}-agg{aggr}-epochs{training_params['n_epochs']}{proj_str}_fold{k+1}.pth", 
+            f"{results_path}/models/EdgePointGNN-link{r_link}-hidden{n_hidden}-latent{n_latent}-selfloops{int(use_loops)}-agg{aggr}-epochs{training_params['n_epochs']}{proj_str}_fold{k+1}.pth", 
         )
     return model
 
@@ -567,6 +567,8 @@ def main(r_link, aggr, use_loops):
     # make paths in case they don't exist
     Path(f"{results_path}/data").mkdir(parents=True, exist_ok=True)
     Path(f"{results_path}/training-logs").mkdir(parents=True, exist_ok=True)
+    Path(f"{results_path}/models").mkdir(parents=True, exist_ok=True)
+    
     
     pad = r_link / 2
     
@@ -634,7 +636,7 @@ def main(r_link, aggr, use_loops):
                     )
 
                     model.to(device);
-                    model.load_state_dict(torch.load(f"{results_path}/r_link{r_link}/EdgePointGNN-link{r_link}-hidden256-latent128-selfloops1-aggmax-epochs1000_fold1.pth"))
+                    model.load_state_dict(torch.load(f"{results_path}/models/EdgePointGNN-link{r_link}-hidden256-latent128-selfloops1-agg{aggr}-epochs1000_fold{k+1}.pth"))
                     validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection)
             else:
                 print("Loaded 3d data, skipping projected version")
@@ -659,7 +661,7 @@ def main(r_link, aggr, use_loops):
         results = pd.read_csv(f"{results_path}/cross-validation.csv")
 
     print("Saved out metrics in LaTeX table format")
-    save_metrics(results)
+    save_metrics(results, results_path=results_path)
 
     if make_plots:
         print("Saved RF and GNN comparison figure")
