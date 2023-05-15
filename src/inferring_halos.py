@@ -16,8 +16,8 @@ from model import *
 from train import *
 
 parser = argparse.ArgumentParser(description='Supply aggregation function and whether loops are used.')
-parser.add_argument('--aggr', help='Aggregation function: "sum" or "max"', required=True, type=str)
-parser.add_argument('--loops', help='Whether to use self-loops: "True" or "False"', required=True, type=bool)
+parser.add_argument('--aggr', help='Aggregation function: "sum", "max", or "multi"', required=True, type=str)
+parser.add_argument('--loops', help='Whether to use self-loops: "True" or "False"', required=True, type=int)
 
 args = parser.parse_args()
 
@@ -364,7 +364,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
         estimate_all_subhalos=True,
         use_global_pooling=False,
         n_out=out_features,
-        aggr=aggr
+        aggr=(["sum", "max", "mean"] if aggr == "multi" else aggr)
     )
 
     model.to(device);
@@ -632,7 +632,7 @@ def main(r_link, aggr, use_loops):
                         estimate_all_subhalos=True,
                         use_global_pooling=False,
                         n_out=out_features,
-                        aggr=aggr
+                        aggr=(["sum", "max", "mean"] if aggr == "multi" else aggr)
                     )
 
                     model.to(device);
@@ -671,6 +671,6 @@ def main(r_link, aggr, use_loops):
 if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
-    
+        
     for r_link in [1, 2, 3, 5, 7.5, 10, 12.5, 15]:
         main(r_link=r_link, aggr=aggr, use_loops=use_loops)
