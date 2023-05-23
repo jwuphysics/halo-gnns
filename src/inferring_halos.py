@@ -11,13 +11,25 @@ from sklearn.ensemble import RandomForestRegressor
 import sys
 from tqdm import tqdm
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import (
+    MessagePassing, GCNConv, PPFConv, MetaLayer, EdgeConv,
+    global_mean_pool, global_max_pool, global_add_pool
+)
+from torch_cluster import radius_graph
+
+
 from data import *
-from model import *
+# from model import *
 from train import *
 
 parser = argparse.ArgumentParser(description='Supply aggregation function and whether loops are used.')
 parser.add_argument('--aggr', help='Aggregation function: "sum", "max", or "multi"', required=True, type=str)
 parser.add_argument('--loops', help='Whether to use self-loops: "True" or "False"', required=True, type=int)
+parser.add_argument('--residuals', default=False, help='Whether to predict RF residuals: "True" or "False"', required=False, type=int)
+
 
 args = parser.parse_args()
 
@@ -35,8 +47,8 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ### params for generating data products, visualizations, etc.
 recompile_data = False
-retrain = True
-revalidate = True
+retrain = False
+revalidate = False
 make_plots = True
 save_models = True
 
@@ -60,7 +72,7 @@ training_params = dict(
     batch_size=batch_size,
     learning_rate=1e-2,
     weight_decay=1e-4,
-    n_epochs=1000,
+    n_epochs=500,
 )
 
 split = 6 # N_subboxes = split**3
@@ -70,7 +82,6 @@ train_test_frac_split = split**2
 ### GNN params
 undirected = True
 periodic = False
-
 
 def make_webs(
     tng_base_path="../illustris_data/TNG300-1/output", 
@@ -86,7 +97,8 @@ def make_webs(
     periodic=False, 
     use_loops=True,
     in_projection=False,
-    normalization_params=normalization_params
+    normalization_params=normalization_params,
+    predict_residuals=False
 ):
     
     if use_gal:
@@ -265,13 +277,143 @@ def make_webs(
 
                 proj_str = "-projected" if in_projection else ""
 
-                if data_path is None:
-                    data_path = f'{tng_base_path}/cosmic_graphs/gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
+    if data_path is None:
+        data_path = f'{tng_base_path}/cosmic_graphs/gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
 
-                Path(f'{tng_base_path}/cosmic_graphs').mkdir(parents=True, exist_ok=True)
+    Path(f'{tng_base_path}/cosmic_graphs').mkdir(parents=True, exist_ok=True)
 
-                with open(data_path, 'wb') as handle:
-                    pickle.dump(data, handle)
+    with open(data_path, 'wb') as handle:
+        pickle.dump(data, handle)
+
+        
+class EdgePointLayer(MessagePassing):
+    """Graphnet with point + edge layers.
+    
+    Very loosely inspired by https://github.com/PabloVD/HaloGraphNet.
+    Initialized with `sum` aggregation, although `max` or others are possible.
+    """
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
+        super(EdgePointLayer, self).__init__(aggr)
+
+        # Initialization of the MLP:
+        # Here, the number of input features correspond to the hidden node
+        # dimensionality plus point dimensionality (=3, or 1 if only modulus is used).
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * in_channels - 2, mid_channels, bias=True),
+            nn.LayerNorm(mid_channels),
+            nn.ReLU(),
+            nn.Linear(mid_channels, mid_channels, bias=True),
+            nn.LayerNorm(mid_channels),
+            nn.ReLU(),
+            nn.Linear(mid_channels, out_channels, bias=True),
+        )
+
+        self.messages = 0.
+        self.input = 0.
+        self.use_mod = use_mod
+
+    def forward(self, x, edge_index):
+        return self.propagate(edge_index, x=x)
+
+    def message(self, x_i, x_j):
+        """Message passing function:
+            x_j defines the features of neighboring nodes as shape [num_edges, in_channels]
+            pos_j defines the position of neighboring nodes as shape [num_edges, 3]
+            pos_i defines the position of central nodes as shape [num_edges, 3]
+        """
+
+        pos_i, pos_j = x_i[:,:3], x_j[:,:3]
+
+        input = pos_j - pos_i  # Compute spatial relation.
+        input = input[:,0]**2.+input[:,1]**2 + input[:,2]**2.
+        input = input.view(input.shape[0], 1)
+        input = torch.cat([x_i, x_j[:, 3:], input], dim=-1)
+
+        self.input = input
+        self.messages = self.mlp(input)
+
+        return self.messages
+
+class EdgePointGNN(nn.Module):
+    """Graph net over nodes and edges with multiple unshared layers, and sequential layers with residual connections.
+    Self-loops also get their own MLP (i.e. galaxy-halo connection).
+    """
+    def __init__(self, node_features, n_layers, D_link, hidden_channels=64, aggr="sum", latent_channels=64, n_out=2, n_unshared_layers=4, loop=True, estimate_all_subhalos=True, use_global_pooling=True):
+        super(EdgePointGNN, self).__init__()
+
+        in_channels = node_features
+        
+        layers = [
+            nn.ModuleList([
+                EdgePointLayer(in_channels, hidden_channels, latent_channels, aggr=aggr)
+                for _ in range(n_unshared_layers)
+            ])
+        ]
+        for _ in range(n_layers-1):
+            layers += [
+                nn.ModuleList([
+                    EdgePointLayer(3 * latent_channels * n_unshared_layers, hidden_channels, latent_channels, aggr=aggr) 
+                    for _ in range(n_unshared_layers)
+                ])
+            ]
+        self.n_out = n_out
+        self.layers = nn.ModuleList(layers)
+        self.estimate_all_subhalos = estimate_all_subhalos
+        self.use_global_pooling = use_global_pooling
+
+        n_pool = (len(aggr) if isinstance(aggr, list) else 1) 
+        self.fc = nn.Sequential(
+            (
+                nn.Linear((n_unshared_layers * n_pool )* latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos
+                else nn.Linear(n_unshared_layers * latent_channels * 3, latent_channels, bias=True)
+            ),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, 2 * n_out, bias=True)
+        )
+        
+        self.galaxy_halo_mlp = nn.Sequential(
+            nn.Linear(node_features, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, 2 * n_out, bias=True)
+        )
+        
+        self.D_link = D_link
+        self.loop = loop
+        self.pooled = 0.
+        self.h = 0.
+    
+    def forward(self, data):
+        
+        # determine edges by getting neighbors within radius defined by `D_link`
+        edge_index = radius_graph(data.pos, r=self.D_link, batch=data.batch, loop=self.loop)
+
+        x = torch.cat([unshared_layer(data.x, edge_index=edge_index) for unshared_layer in self.layers[0]], axis=1)
+        self.h = x
+        x = x.relu()
+        
+        for layer in self.layers[1:]:
+            # use residual
+            x = self.h + torch.cat([unshared_layer(x, edge_index=edge_index) for unshared_layer in layer], axis=1)
+        
+            self.h = x
+            x = x.relu()
+        
+        # x = torch.concat([x, self.galaxy_halo_mlp(data.x)], axis=1)
+        
+        if self.estimate_all_subhalos:
+            # returns all of the subhalos
+            return self.fc(x) + self.galaxy_halo_mlp(data.x)
+        else:
+            import sys
+            sys.exit()
 
                     
 def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, boxsize=302.6, fontsize=12, results_path=None):
@@ -311,12 +453,15 @@ def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, box
         cb = fig.colorbar(sc, shrink=0.805, aspect=40, location="top", pad=0.03)
     cb.set_label("log($M_{\\rm halo}/M_{\\odot})$", fontsize=fontsize)
 
+    ax.set_xlim(0, 50)
+    ax.set_ylim(0, 50)
     ax.xaxis.set_tick_params(labelsize=fontsize)
     ax.yaxis.set_tick_params(labelsize=fontsize)
     ax.set_xlabel("X [Mpc]", fontsize=fontsize)
     ax.set_ylabel("Y [Mpc]", fontsize=fontsize)
 
     if projection=="3d": 
+        ax.set_zlim(0, 50)
         ax.zaxis.set_tick_params(labelsize=fontsize)
         ax.set_zlabel("Z [Mpc]", fontsize=fontsize)
         ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
@@ -336,9 +481,11 @@ def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, box
         fig.savefig(f"{results_path}/cosmic-graph.png", dpi=300)
     else:
         fig.savefig(f"{results_path}/cosmic-graph-projection.png", dpi=300)
+    
+    plt.close()
 
         
-def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_projection=False, make_plots=True, results_path=None):
+def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_projection=False, make_plots=True, results_path=None, predict_residuals=False, hidden_channels=256, latent_channels=128, n_layers=1):
     """Trains GNN using global optimization params"""    
     proj_str = "-projected" if in_projection else ""
     
@@ -347,19 +494,27 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
     
     gc.collect();
     print(f"Training fold {k+1}/{split}" + "\n")
+    
+    if predict_residuals:
+        print("Comparing against random forest model")
+
+        X_train = np.concatenate([d.x[:, -1] for d in data_train]).reshape((-1, 1))
+        y_train = np.concatenate([d.y[:, 0] for d in data_train])
+
+        rf = RandomForestRegressor()
+        rf.fit(X_train, y_train)
+        X_valid = np.concatenate([d.x[:, -1] for d in data_valid]).reshape((-1, 1))
+        p_log_Mhalo_rf = rf.predict(X_valid)
 
     node_features = data[0].x.shape[1]
     out_features = data[0].y.shape[1]
 
-    n_hidden = 256
-    n_latent = 128
-
     model = EdgePointGNN(
         node_features=node_features, 
-        n_layers=1, 
+        n_layers=n_layers, 
         D_link=r_link,
-        hidden_channels=n_hidden,
-        latent_channels=n_latent,
+        hidden_channels=hidden_channels,
+        latent_channels=latent_channels,
         loop=use_loops,
         estimate_all_subhalos=True,
         use_global_pooling=False,
@@ -388,19 +543,25 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
     valid_losses = []
     for epoch in range(training_params["n_epochs"]):
 
-        # anneal 
-        if (epoch == 500):
+        # anneal at 25%, 50%, and 75%
+        if (epoch == int(training_params["n_epochs"] * 0.5)):
             optimizer = torch.optim.AdamW(
                 model.parameters(), 
                 lr=training_params["learning_rate"] / 5, 
                 weight_decay=training_params["weight_decay"] / 5
             )
-        if (epoch == 750):
+        if (epoch == int(training_params["n_epochs"] * 0.75)):
             optimizer = torch.optim.AdamW(
                 model.parameters(), 
                 lr=training_params["learning_rate"] / 25, 
                 weight_decay=training_params["weight_decay"] / 25
             )
+        # if (epoch == int(training_params["n_epochs"] * 0.9)):
+        #     optimizer = torch.optim.AdamW(
+        #         model.parameters(), 
+        #         lr=training_params["learning_rate"] / 1000, 
+        #         weight_decay=training_params["weight_decay"] / 1000
+        #     )
 
         train_loss = train(train_loader, model, optimizer, device, in_projection=in_projection)
         valid_loss, valid_std, p, y, logvar_p  = validate(valid_loader, model, device, in_projection=in_projection)
@@ -420,7 +581,9 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.grid(alpha=0.15)
-        plt.ylim(-5.5, -2)
+        if in_projection:
+            plt.ylim(-9, -4)
+        plt.ylim(-10, -4)
         plt.tight_layout()
 
         plt.savefig(f"{results_path}/training-logs/losses{proj_str}-fold{k+1}.png")
@@ -428,11 +591,11 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
     if save_models:
         torch.save(
             model.state_dict(),
-            f"{results_path}/models/EdgePointGNN-link{r_link}-hidden{n_hidden}-latent{n_latent}-selfloops{int(use_loops)}-agg{aggr}-epochs{training_params['n_epochs']}{proj_str}_fold{k+1}.pth", 
+            f"{results_path}/models/EdgePointGNN-link{r_link}-hidden{hidden_channels}-latent{latent_channels}-selfloops{int(use_loops)}-agg{aggr}-epochs{training_params['n_epochs']}{proj_str}_fold{k+1}.pth", 
         )
     return model
 
-def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots=True, results_path=None):
+def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots=True, results_path=None, predict_residuals=False):
     """Validates and compares GNN model against RF models"""
     data_train = data[:k*train_test_frac_split] + data[(k+1)*train_test_frac_split:]
     data_valid = data[k*train_test_frac_split:(k+1)*train_test_frac_split]
@@ -448,21 +611,22 @@ def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots
     log_Mstar = np.concatenate([d.x[:, -1] for d in data_valid])
 
     # compare against random forest model
-    print("Comparing against random forest model")
+    if not predict_residuals:
+        print("Comparing against random forest model")
 
-    X_train = np.concatenate([d.x[:, -1] for d in data_train]).reshape((-1, 1))
-    y_train = np.concatenate([d.y[:, 0] for d in data_train])
+        X_train = np.concatenate([d.x[:, -1] for d in data_train]).reshape((-1, 1))
+        y_train = np.concatenate([d.y[:, 0] for d in data_train])
 
-    rf = RandomForestRegressor()
-    rf.fit(X_train, y_train)
-    X_valid = np.concatenate([d.x[:, -1] for d in data_valid]).reshape((-1, 1))
-    p_log_Mhalo_rf = rf.predict(X_valid)
+        rf = RandomForestRegressor()
+        rf.fit(X_train, y_train)
+        X_valid = np.concatenate([d.x[:, -1] for d in data_valid]).reshape((-1, 1))
+        p_log_Mhalo_rf = rf.predict(X_valid)
 
     p_gnn_key = "p_GNN_2d" if in_projection else "p_GNN_3d" 
     df = pd.DataFrame({
         "log_Mstar": log_Mstar,
         "log_Mhalo": y_log_Mhalo,
-        "p_RF": p_log_Mhalo_rf,
+        "p_RF": np.zeros_like(log_Mstar) if predict_residuals else p_log_Mhalo_rf,
         p_gnn_key: p_log_Mhalo
     })
     proj_str = "-projected" if in_projection else ""
@@ -531,14 +695,14 @@ def plot_comparison_figure(df, results_path=None):
     gs = fig.add_gridspec(1, 2, wspace=0.05, left=0.05, right=0.95, bottom=0.025, top=0.975, )
     ax1, ax2 = gs.subplots(sharey="row")
 
-    ax1.scatter(df.log_Mstar, df.p_RF, c=df.log_Mhalo, **sc_kwargs)
-    ax1.text(0.025, 0.96, f"RF: $M_{{\\bigstar}}$\n{np.sqrt(np.mean((df.p_RF - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax1.transAxes, fontsize=16)
+    ax1.scatter(df.log_Mhalo, df.p_RF, c=df.log_Mstar, **sc_kwargs)
+    ax1.text(0.025, 0.96, f"RF\n{np.sqrt(np.mean((df.p_RF - df.log_Mhalo)**2)):.3f} dex", va="top", transform=ax1.transAxes, fontsize=16)
 
-    sc = ax2.scatter(df.log_Mstar, df.p_GNN_3d, c=df.log_Mhalo, **sc_kwargs)
-    ax2.text(0.025, 0.96, f"GNN\n{np.sqrt(np.mean((df.p_GNN_3d - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax2.transAxes, fontsize=16)
+    sc = ax2.scatter(df.log_Mhalo, df.p_GNN_3d, c=df.log_Mstar, **sc_kwargs)
+    ax2.text(0.025, 0.96, f"GNN\n{np.sqrt(np.mean((df.p_GNN_3d - df.log_Mhalo)**2)):.3f} dex", va="top", transform=ax2.transAxes, fontsize=16)
 
     cb = fig.colorbar(sc, ax=[ax1, ax2], pad=0.03, shrink=0.83)
-    cb.set_label("True log($M_{\\rm bigstar}/M_{\\odot}}$)", fontsize=14)
+    cb.set_label("True log($M_{\\bigstar}/M_{\\odot}}$)", fontsize=14)
 
 
     for ax in [ax1, ax2]:
@@ -559,21 +723,25 @@ def plot_comparison_figure(df, results_path=None):
     plt.savefig(f'{results_path}/GNN-vs-RF.png')
 
     
-def main(r_link, aggr, use_loops):
+def main(r_link, aggr, use_loops, predict_residuals):
     """Run the full pipeline"""
     
-    results_path = f"{ROOT}/results/inferring-halos_{aggr}_loops-{int(use_loops)}/r_link{r_link}"
+    results_path = f"{ROOT}/results/predicting-Mhalo{'-residuals' if predict_residuals else ''}/halos-upgraded_{aggr}_loops-{int(use_loops)}/r_link{r_link}"
     
     # make paths in case they don't exist
     Path(f"{results_path}/data").mkdir(parents=True, exist_ok=True)
     Path(f"{results_path}/training-logs").mkdir(parents=True, exist_ok=True)
     Path(f"{results_path}/models").mkdir(parents=True, exist_ok=True)
     
+    n_hidden = 64
+    n_latent = 16
+    n_layers = 2
     
-    pad = r_link / 2
+    pad = 5 # r_link / 2
     
     if not os.path.isfile(f"{results_path}/cross-validation.csv") or recompile_data or retrain or revalidate:
-        for in_projection in [True, False]:
+        for in_projection in [False, True]:
+            import gc; gc.collect()
             proj_str = "-projected" if in_projection else ""
 
             data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
@@ -595,21 +763,22 @@ def main(r_link, aggr, use_loops):
                     undirected=undirected, 
                     periodic=periodic,
                     use_loops=use_loops, 
-                    in_projection=in_projection
+                    in_projection=in_projection,
+                    predict_residuals=predict_residuals
                 )
 
             print(data_path)
             data = pickle.load(open(data_path, 'rb'))
 
             # retrain all data
-            if retrain:
+            if retrain or not os.path.isfile(f"{results_path}/cross-validation.csv"):
                 for k in range(split): 
                     print("Training!")
                     model = train_cosmic_gnn(
-                        data, k=k, r_link=r_link, aggr=aggr, use_loops=use_loops, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path
+                        data, k=k, r_link=r_link, aggr=aggr, use_loops=use_loops, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path, predict_residuals=predict_residuals, hidden_channels=n_hidden, latent_channels=n_latent, n_layers=n_layers
                     )
                     
-                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path)
+                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path, predict_residuals=predict_residuals)
             # make sure cross-validation results exist (at least the final one)
             elif (revalidate and os.path.isfile(f"{results_path}/validation{proj_str}-fold{split}.csv")):
                 print("Validating!")
@@ -619,12 +788,9 @@ def main(r_link, aggr, use_loops):
                     node_features = data[0].x.shape[1]
                     out_features = data[0].y.shape[1]
 
-                    n_hidden = 256
-                    n_latent = 128
-
                     model = EdgePointGNN(
                         node_features=node_features, 
-                        n_layers=1, 
+                        n_layers=n_layers, 
                         D_link=r_link,
                         hidden_channels=n_hidden,
                         latent_channels=n_latent,
@@ -637,7 +803,7 @@ def main(r_link, aggr, use_loops):
 
                     model.to(device);
                     model.load_state_dict(torch.load(f"{results_path}/models/EdgePointGNN-link{r_link}-hidden256-latent128-selfloops1-agg{aggr}-epochs1000_fold{k+1}.pth"))
-                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection)
+                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, predict_residuals=predict_residuals)
             else:
                 print("Loaded 3d data, skipping projected version")
                 break
@@ -648,20 +814,22 @@ def main(r_link, aggr, use_loops):
 
         # combine results together and write outputs
         results = combine_results(split=split, centrals=is_central, results_path=results_path)
-    elif make_plots:
+    else:
+        print("Loading previous results (if you want to refresh the results, set retrain=True and/or revalidate=True)")
+        results = pd.read_csv(f"{results_path}/cross-validation.csv")
+    
+    print("Saved out metrics in LaTeX table format")
+    save_metrics(results, results_path=results_path)
+    
+    if make_plots:
         print("Visualizing graphs")
         for in_projection in [True, False]:
             proj_str = "-projected" if in_projection else ""
             data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
             data = pickle.load(open(data_path, 'rb'))
             visualize_graph(data[-1], projection=("2d" if in_projection else "3d"), results_path=results_path)
-        results = pd.read_csv(f"{results_path}/cross-validation.csv")
-    else:
-        print("Loading previous results (if you want to refresh the results, set retrain=True and/or revalidate=True)")
-        results = pd.read_csv(f"{results_path}/cross-validation.csv")
 
-    print("Saved out metrics in LaTeX table format")
-    save_metrics(results, results_path=results_path)
+
 
     if make_plots:
         print("Saved RF and GNN comparison figure")
@@ -671,6 +839,7 @@ def main(r_link, aggr, use_loops):
 if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
+    predict_residuals = args.residuals
         
-    for r_link in [1, 2, 3, 5, 7.5, 10, 12.5, 15]:
-        main(r_link=r_link, aggr=aggr, use_loops=use_loops)
+    for r_link in [0.3, 0.5, 1, 2, 3, 5, 7.5, 10]:
+        main(r_link=r_link, aggr=aggr, use_loops=use_loops, predict_residuals=predict_residuals)
