@@ -593,6 +593,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
             model.state_dict(),
             f"{results_path}/models/EdgePointGNN-link{r_link}-hidden{hidden_channels}-latent{latent_channels}-selfloops{int(use_loops)}-agg{aggr}-epochs{training_params['n_epochs']}{proj_str}_fold{k+1}.pth", 
         )
+        plt.close()
     return model
 
 def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots=True, results_path=None, predict_residuals=False):
@@ -721,6 +722,7 @@ def plot_comparison_figure(df, results_path=None):
 
 
     plt.savefig(f'{results_path}/GNN-vs-RF.png')
+    plt.close()
 
     
 def main(r_link, aggr, use_loops, predict_residuals):
