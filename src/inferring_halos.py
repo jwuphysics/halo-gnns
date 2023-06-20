@@ -28,8 +28,6 @@ from train import *
 parser = argparse.ArgumentParser(description='Supply aggregation function and whether loops are used.')
 parser.add_argument('--aggr', help='Aggregation function: "sum", "max", or "multi"', required=True, type=str)
 parser.add_argument('--loops', help='Whether to use self-loops: "True" or "False"', required=True, type=int)
-parser.add_argument('--residuals', default=False, help='Whether to predict RF residuals: "True" or "False"', required=False, type=int)
-
 
 args = parser.parse_args()
 
@@ -47,18 +45,18 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ### params for generating data products, visualizations, etc.
 recompile_data = False
-retrain = False
-revalidate = False
+retrain = True
+revalidate = True
 make_plots = True
 save_models = True
 
 ### simulation and selection criteria params
-use_gal = True # gal -> dark matter, or vice versa
+predict_halo = False # gal -> dark matter, or vice versa
 
 
 cuts = {
-    "minimum_log_stellar_mass": 9.5,
-    "minimum_log_halo_mass": 11,
+    "minimum_log_stellar_mass": 7.5,
+    "minimum_log_halo_mass": 9,
     "minimum_n_star_particles": 50
 }
 
@@ -71,7 +69,7 @@ batch_size = 36
 training_params = dict(
     batch_size=batch_size,
     learning_rate=1e-2,
-    weight_decay=1e-4,
+    weight_decay=1e-6,
     n_epochs=500,
 )
 
@@ -91,17 +89,16 @@ def make_webs(
     pad=2.5,
     split=6,
     cuts=cuts, 
-    use_gal=False, 
+    predict_halo=False, 
     h=0.6774, 
     undirected=True, 
     periodic=False, 
     use_loops=True,
     in_projection=False,
     normalization_params=normalization_params,
-    predict_residuals=False
 ):
     
-    if use_gal:
+    if predict_halo:
         # use_cols = ['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz','subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']
         use_cols = ['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz','subhalo_logstellarmass']
         # y_cols = ['subhalo_loghalomass', 'subhalo_logvmax'] 
@@ -233,8 +230,6 @@ def make_webs(
                 diff = pos[row]-pos[col]
                 dist = np.linalg.norm(diff, axis=1)
 
-                use_gal = True
-
                 if periodic:
                     # Take into account periodic boundary conditions, correcting the distances
                     for i, pos_i in enumerate(diff):
@@ -278,7 +273,7 @@ def make_webs(
                 proj_str = "-projected" if in_projection else ""
 
     if data_path is None:
-        data_path = f'{tng_base_path}/cosmic_graphs/gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
+        data_path = f'{tng_base_path}/cosmic_graphs/gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(predict_halo)}{proj_str}.pkl'
 
     Path(f'{tng_base_path}/cosmic_graphs').mkdir(parents=True, exist_ok=True)
 
@@ -485,7 +480,7 @@ def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, box
     plt.close()
 
         
-def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_projection=False, make_plots=True, results_path=None, predict_residuals=False, hidden_channels=256, latent_channels=128, n_layers=1):
+def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_projection=False, make_plots=True, results_path=None, hidden_channels=256, latent_channels=128, n_layers=1, n_unshared_layers=1):
     """Trains GNN using global optimization params"""    
     proj_str = "-projected" if in_projection else ""
     
@@ -495,17 +490,6 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
     gc.collect();
     print(f"Training fold {k+1}/{split}" + "\n")
     
-    if predict_residuals:
-        print("Comparing against random forest model")
-
-        X_train = np.concatenate([d.x[:, -1] for d in data_train]).reshape((-1, 1))
-        y_train = np.concatenate([d.y[:, 0] for d in data_train])
-
-        rf = RandomForestRegressor()
-        rf.fit(X_train, y_train)
-        X_valid = np.concatenate([d.x[:, -1] for d in data_valid]).reshape((-1, 1))
-        p_log_Mhalo_rf = rf.predict(X_valid)
-
     node_features = data[0].x.shape[1]
     out_features = data[0].y.shape[1]
 
@@ -516,6 +500,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
         hidden_channels=hidden_channels,
         latent_channels=latent_channels,
         loop=use_loops,
+        n_unshared_layers=n_unshared_layers,
         estimate_all_subhalos=True,
         use_global_pooling=False,
         n_out=out_features,
@@ -556,11 +541,11 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
                 lr=training_params["learning_rate"] / 25, 
                 weight_decay=training_params["weight_decay"] / 25
             )
-        # if (epoch == int(training_params["n_epochs"] * 0.9)):
+        # if (epoch == int(training_params["n_epochs"] * 0.75)):
         #     optimizer = torch.optim.AdamW(
         #         model.parameters(), 
-        #         lr=training_params["learning_rate"] / 1000, 
-        #         weight_decay=training_params["weight_decay"] / 1000
+        #         lr=training_params["learning_rate"] / 125, 
+        #         weight_decay=training_params["weight_decay"] / 125
         #     )
 
         train_loss = train(train_loader, model, optimizer, device, in_projection=in_projection)
@@ -581,9 +566,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.grid(alpha=0.15)
-        if in_projection:
-            plt.ylim(-9, -4)
-        plt.ylim(-10, -4)
+        plt.ylim(plt.ylim()[0], min(plt.ylim()[1], -2))
         plt.tight_layout()
 
         plt.savefig(f"{results_path}/training-logs/losses{proj_str}-fold{k+1}.png")
@@ -596,7 +579,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
         plt.close()
     return model
 
-def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots=True, results_path=None, predict_residuals=False):
+def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots=True, results_path=None):
     """Validates and compares GNN model against RF models"""
     data_train = data[:k*train_test_frac_split] + data[(k+1)*train_test_frac_split:]
     data_valid = data[k*train_test_frac_split:(k+1)*train_test_frac_split]
@@ -607,29 +590,43 @@ def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots
     # actually validate model
     _, _, p_valid, y_valid, logvar_p = validate(valid_loader, model, device)
     p_valid = p_valid.reshape((-1, 1))
-    p_log_Mhalo = p_valid[:, 0]
-    y_log_Mhalo = y_valid[:, 0]
-    log_Mstar = np.concatenate([d.x[:, -1] for d in data_valid])
+    y_valid = y_valid[:, 0]
+    
+    if predict_halo:
+        X_train = np.concatenate([d.x[:, -2:] for d in data_train]).reshape((-1, 1))
+        y_train = np.concatenate([d.y[:, 0] for d in data_train])
+        
+        X_valid = np.concatenate([d.x[:, -1] for d in data_valid])
+        
+    else:
+        X_train = np.concatenate([d.x[:, -2:] for d in data_train]).reshape((-1, 2))
+        y_train = np.concatenate([d.y[:, 0] for d in data_train])
+        
+        X_valid = np.concatenate([d.x[:, -2:] for d in data_valid])
 
     # compare against random forest model
-    if not predict_residuals:
-        print("Comparing against random forest model")
-
-        X_train = np.concatenate([d.x[:, -1] for d in data_train]).reshape((-1, 1))
-        y_train = np.concatenate([d.y[:, 0] for d in data_train])
-
-        rf = RandomForestRegressor()
-        rf.fit(X_train, y_train)
-        X_valid = np.concatenate([d.x[:, -1] for d in data_valid]).reshape((-1, 1))
-        p_log_Mhalo_rf = rf.predict(X_valid)
+    print("Comparing against random forest model")
+    
+    rf = RandomForestRegressor()
+    rf.fit(X_train, y_train)
+    p_valid_rf = rf.predict(X_valid)
 
     p_gnn_key = "p_GNN_2d" if in_projection else "p_GNN_3d" 
-    df = pd.DataFrame({
-        "log_Mstar": log_Mstar,
-        "log_Mhalo": y_log_Mhalo,
-        "p_RF": np.zeros_like(log_Mstar) if predict_residuals else p_log_Mhalo_rf,
-        p_gnn_key: p_log_Mhalo
-    })
+    if predict_halo:
+        df = pd.DataFrame({
+            "log_Mstar": X_valid.flatten(),
+            "log_Mhalo": y_valid.flatten(),
+            "p_RF": p_valid_rf.flatten(),
+            p_gnn_key: p_valid.flatten()
+        })
+    else:
+        df = pd.DataFrame({
+            "log_Mhalo": X_valid[:,0].flatten(),
+            "log_Vmax": X_valid[:,1].flatten(),
+            "log_Mstar": y_valid.flatten(),
+            "p_RF": p_valid_rf.flatten(),
+            p_gnn_key: p_valid.flatten()
+        })
     proj_str = "-projected" if in_projection else ""
     df.to_csv(f"{results_path}/validation{proj_str}-fold{k+1}.csv", index=False)
      
@@ -725,19 +722,23 @@ def plot_comparison_figure(df, results_path=None):
     plt.close()
 
     
-def main(r_link, aggr, use_loops, predict_residuals):
+def main(
+    r_link, aggr, use_loops,
+    n_hidden=64,
+    n_latent=16,
+    n_layers=4,
+    n_unshared_layers=4
+):
     """Run the full pipeline"""
     
-    results_path = f"{ROOT}/results/predicting-Mhalo{'-residuals' if predict_residuals else ''}/halos-upgraded_{aggr}_loops-{int(use_loops)}/r_link{r_link}"
+    results_path = f"{ROOT}/results/predicting-{'Mhalo' if predict_halo else 'Mstar'}/gnns-upgraded_{aggr}_loops-{int(use_loops)}/r_link{r_link}"
     
     # make paths in case they don't exist
     Path(f"{results_path}/data").mkdir(parents=True, exist_ok=True)
     Path(f"{results_path}/training-logs").mkdir(parents=True, exist_ok=True)
     Path(f"{results_path}/models").mkdir(parents=True, exist_ok=True)
     
-    n_hidden = 64
-    n_latent = 16
-    n_layers = 2
+
     
     pad = 5 # r_link / 2
     
@@ -746,7 +747,7 @@ def main(r_link, aggr, use_loops, predict_residuals):
             import gc; gc.collect()
             proj_str = "-projected" if in_projection else ""
 
-            data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
+            data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(predict_halo)}{proj_str}.pkl'
 
             if os.path.isfile(data_path) and not recompile_data:
                 print('File already exists: ', end='')
@@ -760,13 +761,12 @@ def main(r_link, aggr, use_loops, predict_residuals):
                     pad=pad, 
                     split=split,
                     cuts=cuts, 
-                    use_gal=use_gal, 
+                    predict_halo=predict_halo, 
                     h=h, 
                     undirected=undirected, 
                     periodic=periodic,
                     use_loops=use_loops, 
                     in_projection=in_projection,
-                    predict_residuals=predict_residuals
                 )
 
             print(data_path)
@@ -777,10 +777,10 @@ def main(r_link, aggr, use_loops, predict_residuals):
                 for k in range(split): 
                     print("Training!")
                     model = train_cosmic_gnn(
-                        data, k=k, r_link=r_link, aggr=aggr, use_loops=use_loops, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path, predict_residuals=predict_residuals, hidden_channels=n_hidden, latent_channels=n_latent, n_layers=n_layers
+                        data, k=k, r_link=r_link, aggr=aggr, use_loops=use_loops, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path, hidden_channels=n_hidden, latent_channels=n_latent, n_layers=n_layers
                     )
                     
-                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path, predict_residuals=predict_residuals)
+                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path)
             # make sure cross-validation results exist (at least the final one)
             elif (revalidate and os.path.isfile(f"{results_path}/validation{proj_str}-fold{split}.csv")):
                 print("Validating!")
@@ -793,6 +793,7 @@ def main(r_link, aggr, use_loops, predict_residuals):
                     model = EdgePointGNN(
                         node_features=node_features, 
                         n_layers=n_layers, 
+                        n_unshared_layers=n_unshared_layers,
                         D_link=r_link,
                         hidden_channels=n_hidden,
                         latent_channels=n_latent,
@@ -805,7 +806,7 @@ def main(r_link, aggr, use_loops, predict_residuals):
 
                     model.to(device);
                     model.load_state_dict(torch.load(f"{results_path}/models/EdgePointGNN-link{r_link}-hidden256-latent128-selfloops1-agg{aggr}-epochs1000_fold{k+1}.pth"))
-                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, predict_residuals=predict_residuals)
+                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection)
             else:
                 print("Loaded 3d data, skipping projected version")
                 break
@@ -827,7 +828,7 @@ def main(r_link, aggr, use_loops, predict_residuals):
         print("Visualizing graphs")
         for in_projection in [True, False]:
             proj_str = "-projected" if in_projection else ""
-            data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
+            data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(predict_halo)}{proj_str}.pkl'
             data = pickle.load(open(data_path, 'rb'))
             visualize_graph(data[-1], projection=("2d" if in_projection else "3d"), results_path=results_path)
 
@@ -841,7 +842,6 @@ def main(r_link, aggr, use_loops, predict_residuals):
 if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
-    predict_residuals = args.residuals
         
     for r_link in [0.3, 0.5, 1, 2, 3, 5, 7.5, 10]:
-        main(r_link=r_link, aggr=aggr, use_loops=use_loops, predict_residuals=predict_residuals)
+        main(r_link=r_link, aggr=aggr, use_loops=use_loops)

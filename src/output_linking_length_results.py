@@ -11,25 +11,32 @@ ROOT = Path(__file__).parent.parent.resolve()
 make_figures = True
 use_multi_aggregation = True
 split_by_mass = True
+predict_Mhalo = False
 
 
-def rmse_2d_lowmass(df): 
-    return ((df.log_Mhalo - df.p_GNN_2d)[df.log_Mstar < 10.5] ** 2).mean()**0.5
+def rmse_2d_lowmass(df, predict_Mhalo=predict_Mhalo): 
+    y_col_true = "log_Mhalo" if predict_Mhalo else "log_Mstar"
+    return ((df[y_col_true] - df.p_GNN_2d)[df.log_Mstar < 10.5] ** 2).mean()**0.5
 
 def rmse_2d_highmass(df): 
-    return ((df.log_Mhalo - df.p_GNN_2d)[df.log_Mstar >= 10.5] ** 2).mean()**0.5
+    y_col_true = "log_Mhalo" if predict_Mhalo else "log_Mstar"
+    return ((df[y_col_true] - df.p_GNN_2d)[df.log_Mstar >= 10.5] ** 2).mean()**0.5
 
 def rmse_3d_lowmass(df): 
-    return ((df.log_Mhalo - df.p_GNN_3d)[df.log_Mstar < 10.5] ** 2).mean()**0.5
+    y_col_true = "log_Mhalo" if predict_Mhalo else "log_Mstar"
+    return ((df[y_col_true] - df.p_GNN_3d)[df.log_Mstar < 10.5] ** 2).mean()**0.5
 
 def rmse_3d_highmass(df): 
-    return ((df.log_Mhalo - df.p_GNN_3d)[df.log_Mstar >= 10.5] ** 2).mean()**0.5
+    y_col_true = "log_Mhalo" if predict_Mhalo else "log_Mstar"
+    return ((df[y_col_true] - df.p_GNN_3d)[df.log_Mstar >= 10.5] ** 2).mean()**0.5
 
 def rmse_2d(df):
-    return ((df.log_Mhalo - df.p_GNN_2d) ** 2).mean()**0.5
+    y_col_true = "log_Mhalo" if predict_Mhalo else "log_Mstar"
+    return ((df[y_col_true] - df.p_GNN_2d) ** 2).mean()**0.5
 
 def rmse_3d(df):
-    return ((df.log_Mhalo - df.p_GNN_3d) ** 2).mean()**0.5
+    y_col_true = "log_Mhalo" if predict_Mhalo else "log_Mstar"
+    return ((df[y_col_true] - df.p_GNN_3d) ** 2).mean()**0.5
 
 
 if __name__ == "__main__":
@@ -45,7 +52,7 @@ if __name__ == "__main__":
             print(f"===== EXPERIMENT: {experiment_name} =====".center(72 if split_by_mass else 40))
             linking_length_results = list()
             for D in D_links:
-                df = pd.read_csv(f"{ROOT}/results/predicting-Mhalo/halos-upgraded_{experiment_name}/r_link{D}/cross-validation.csv")
+                df = pd.read_csv(f"{ROOT}/results/predicting-{'Mhalo' if predict_Mhalo else 'Mstar'}/gnns-upgraded_{experiment_name}/r_link{D}/cross-validation.csv")
                 
                 if split_by_mass:
                     linking_length_results.append([rmse_2d_lowmass(df), rmse_2d_highmass(df), rmse_3d_lowmass(df), rmse_3d_highmass(df)])
@@ -59,7 +66,7 @@ if __name__ == "__main__":
             print(results_experiment)
             
             if make_figures:
-                figure_filename = f"{ROOT}/results/predicting-Mhalo/halos-upgraded_{experiment_name}/linking-length-results{'_split-by-mass' if split_by_mass else ''}.png"
+                figure_filename = f"{ROOT}/results/predicting-{'Mhalo' if predict_Mhalo else 'Mstar'}/gnns-upgraded_{experiment_name}/linking-length-results{'_split-by-mass' if split_by_mass else ''}.png"
                 plt.figure(figsize=(5, 5), dpi=150)
                 
                 if split_by_mass:
@@ -77,10 +84,10 @@ if __name__ == "__main__":
                 plt.xlim(0.2, 15)
                 plt.xscale('log')
                 plt.xticks([0.3, 1, 3, 10], [0.3, 1, 3, 10])
-                plt.ylim(0.15, 0.40)
+                plt.ylim(0.08, 0.20)
                 plt.title(experiment_name, fontsize=14)
                 plt.xlabel("Linking length (Mpc)", fontsize=12)
-                plt.ylabel("Halo mass RMSE (dex)", fontsize=12)
+                plt.ylabel("Stellar mass RMSE (dex)", fontsize=12)
                 plt.tight_layout()
                 plt.savefig(figure_filename)
                         
