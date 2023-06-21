@@ -21,18 +21,6 @@ def train(dataloader, model, optimizer, device, augment=True, in_projection=Fals
 
         
         if augment:
-            # random rotation for data augmentation
-            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
-            if in_projection:
-                data.pos = (R[:2, :2] @ data.pos.unsqueeze(-1)).squeeze()
-                data.x[:, :2] = (R[:2, :2] @ data.x[:, :2].unsqueeze(-1)).squeeze()
-            else:
-                data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
-                data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
-            
-                # also augment velocities
-                data.x[:, 3:6] = (R @ data.x[:, 3:6].unsqueeze(-1)).squeeze()
-
             # add random noise
             data_x_scatter = torch.std(data.x, dim=0)
             data_y_scatter = torch.std(data.y, dim=0)
@@ -80,7 +68,7 @@ def validate(dataloader, model, device, in_projection=False, no_velocities=False
             logvar_pred = logvar_pred.view(-1, model.n_out)
             uncertainties.append(np.sqrt(10**logvar_pred.detach().cpu().numpy()).mean(-1))
 
-            # compute loss as sum of two terms for likelihood-free inference
+            # compute loss as sum of two terms a la Moment Networks (Jeffrey & Wandelt 2020)
             if model.estimate_all_subhalos or (model.n_out > 1):
                 loss_mse = F.mse_loss(y_pred, data.y)
                 loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
