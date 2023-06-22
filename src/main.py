@@ -6,9 +6,12 @@ import random
 seed = 42
 
 ROOT = Path(__file__).parents[1].resolve()
+tng_base_path = f"{ROOT}/illustris_data/TNG50-1/output"
 
+experiment = science_params["predict_output"]
 
 verbose = True
+plot_figures = True
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -17,31 +20,23 @@ if __name__ == "__main__":
     random.seed(seed)
     torch.manual_seed(seed)
 
-    filenames = [f"{ROOT}/data/FOF_Subfind/IllustrisTNG/CV_{n}/fof_subhalo_tab_033.hdf5" for n in range(27)]
-    
-    dataset = []
-    n_subhalos = 0
+    df = load_data(
+        tng_base_path=tng_base_path,
+        snapshot=config_params["snapshot"], # default is 99 -> z=0 
+        use_stellarhalfmassradius=feature_params["use_stellarhalfmassradius"],
+        use_velocity=feature_params["use_velocity"],
+        use_only_positions=feature_params["use_only_positions"],
+        in_projection=feature_params["in_projection"]
+    )
 
-    for filename in filenames:
-        df = load_data(
-            filename, 
-            use_stellarhalfmassradius=feature_params["use_stellarhalfmassradius"],
-            use_velocity=feature_params["use_velocity"],
-            use_only_positions=feature_params["use_only_positions"],
-            in_projection=feature_params["in_projection"]
-        )
-
-        dataset_, n_subhalos_ = generate_dataset(
-            df,
-            use_velocity=feature_params["use_velocity"],
-            use_central_galaxy_frame=feature_params["use_central_galaxy_frame"],
-            use_only_positions=feature_params["use_only_positions"],
-            in_projection=feature_params["in_projection"]
-        )
+    dataset, n_subhalos = generate_dataset(
+        df,
+        use_velocity=feature_params["use_velocity"],
+        use_central_galaxy_frame=feature_params["use_central_galaxy_frame"],
+        use_only_positions=feature_params["use_only_positions"],
+        in_projection=feature_params["in_projection"]
+    )
         
-        dataset += dataset_
-        n_subhalos += n_subhalos_
-    
     node_features = dataset[0].x.shape[1]
     n_halos = len(dataset)
     
@@ -57,7 +52,7 @@ if __name__ == "__main__":
         test_frac=training_params["test_frac"],
         batch_size=training_params["batch_size"],
     )
-
+    
     # load model
     model = EdgePointGNN(
         node_features=node_features, 
@@ -81,7 +76,7 @@ if __name__ == "__main__":
     for epoch in range(training_params["n_epochs"]):
         train_loss = train(train_loader, model, optimizer, device, in_projection=feature_params["in_projection"])
         valid_loss, valid_std, *_ = validate(valid_loader, model, device)
-        
+
         train_losses.append(train_loss)
         valid_losses.append(valid_loss)
 
@@ -92,6 +87,28 @@ if __name__ == "__main__":
 
     print(f"Test RMSE: {np.sqrt(np.mean((y_test - p_test)**2)): >4.3f}  Test loss: {test_loss: >4.1f} Test std: {test_std: >5.3f}")
 
-    np.save(f"{ROOT}/results/predict_smhm/test_preds.npy", p_test)
-    np.save(f"{ROOT}/results/predict_smhm/test_trues.npy", y_test)
-    np.save(f"{ROOT}/results/predict_smhm/test_logvars.npy", logvar_test)
+    # save results
+    np.save(f"{ROOT}/results/{experiment}/test_preds.npy", p_test)
+    np.save(f"{ROOT}/results/{experiment}/test_trues.npy", y_test)
+    np.save(f"{ROOT}/results/{experiment}/test_logvars.npy", logvar_test)
+
+    if plot_figures:
+        import matplotlib.pyplot as plt
+        h = config_params["h_reduced"]
+
+        plt.figure(figsize=(4, 4), dpi=200)
+        plt.scatter(y_test, p_test, s=5, edgecolors='none', c="#003f5c", zorder=3)
+        # plt.xlabel("True $\\log(M_{\\rm halo}/[M_\\odot])$")
+        # plt.ylabel("Predicted $\\log(M_{\\rm halo}/[M_\\odot])$")
+        plt.title(experiment, fontsize=16)
+        plt.xlabel("True")
+        plt.ylabel("Predicted")
+        axis_min = np.min((*p_test, *y_test))
+        axis_max = np.max((*p_test, *y_test))
+        plt.plot([axis_min, axis_max], [axis_min, axis_max], c='0.7', lw=2, zorder=1)
+
+        plt.xlim(axis_min, axis_max)
+        plt.ylim(axis_min, axis_max)
+        plt.tight_layout()
+        plt.grid(alpha=0.15)
+        plt.savefig(f"{ROOT}/results/{experiment}/results.png")

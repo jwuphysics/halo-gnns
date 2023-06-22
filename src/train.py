@@ -1,41 +1,47 @@
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
-
+import torch.nn.functional as F
 
 training_params = dict(
-    batch_size=128,
-    learning_rate=3e-4,
-    weight_decay=1e-7,
-    n_epochs=100,
+    batch_size=512,
+    learning_rate=1e-3,
+    weight_decay=1e-5,
+    n_epochs=200,
     valid_frac=0.15, # fraction of dataset for validation
     test_frac=0.15,  # fraction of dataset for testing
 )
 
-def train(dataloader, model, optimizer, device, in_projection=True):
+def train(dataloader, model, optimizer, device, augment=True, in_projection=False, no_positions=False, no_velocities=False):
+    """Assumes that data object in dataloader has 8 columns: x,y,z, vx,vy,vz, Mh, Vmax"""
     model.train()
 
     loss_total = 0
     for data in dataloader:
 
-        # random rotation for data augmentation
-        if in_projection:
-            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)[:2, :2]
-            data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
-            data.x[:, :2] = (R @ data.x[:, :2].unsqueeze(-1)).squeeze()
-        else:
-            R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
-            data.pos = (R @ data.pos.unsqueeze(-1)).squeeze()
-            data.x[:, :3] = (R @ data.x[:, :3].unsqueeze(-1)).squeeze()
+        
+        if augment:
+            # add random noise
+            data_x_scatter = torch.std(data.x, dim=0)
+            data_y_scatter = torch.std(data.y, dim=0)
+            assert (data_x_scatter.shape[0] == len(data.x[0]))
+            data.x += 1e-5 * data_x_scatter
+            data.y += 1e-5 * data_y_scatter
 
         data.to(device)
 
         optimizer.zero_grad()
         y_pred, logvar_pred = model(data).chunk(2, dim=1)
+        y_pred = y_pred.view(-1, model.n_out)
+        logvar_pred = logvar_pred.view(-1, model.n_out)
 
         # compute loss as sum of two terms for likelihood-free inference
-        loss_mse = torch.mean((y_pred - data.y)**2)
-        loss_lfi = torch.mean(((y_pred - data.y)**2 - 10**logvar_pred)**2)
+        if model.estimate_all_subhalos or (model.n_out > 1):
+            loss_mse = F.mse_loss(y_pred, data.y)
+            loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
+        else:
+            loss_mse = F.mse_loss(y_pred.flatten(), data.y)
+            loss_lfi = F.mse_loss((y_pred.flatten() - data.y)**2, 10**logvar_pred.flatten())
         loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
         loss.backward()
@@ -44,7 +50,7 @@ def train(dataloader, model, optimizer, device, in_projection=True):
 
     return loss_total / len(dataloader)
 
-def validate(dataloader, model, device):
+def validate(dataloader, model, device, in_projection=False, no_velocities=False, no_positions=False):
     model.eval()
 
     uncertainties = []
@@ -58,11 +64,17 @@ def validate(dataloader, model, device):
         with torch.no_grad():
             data.to(device)
             y_pred, logvar_pred = model(data).chunk(2, dim=1)
-            uncertainties.append(np.sqrt(10**logvar_pred.detach().cpu().numpy()).mean())
+            y_pred = y_pred.view(-1, model.n_out)
+            logvar_pred = logvar_pred.view(-1, model.n_out)
+            uncertainties.append(np.sqrt(10**logvar_pred.detach().cpu().numpy()).mean(-1))
 
-            # compute loss as sum of two terms for likelihood-free inference
-            loss_mse = torch.mean((y_pred - data.y)**2)
-            loss_lfi = torch.mean(((y_pred - data.y)**2 - 10**logvar_pred)**2)
+            # compute loss as sum of two terms a la Moment Networks (Jeffrey & Wandelt 2020)
+            if model.estimate_all_subhalos or (model.n_out > 1):
+                loss_mse = F.mse_loss(y_pred, data.y)
+                loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
+            else:
+                loss_mse = F.mse_loss(y_pred.flatten(), data.y)
+                loss_lfi = F.mse_loss((y_pred.flatten() - data.y)**2, 10**logvar_pred.flatten())
             loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
             loss_total += loss.item()
@@ -73,10 +85,11 @@ def validate(dataloader, model, device):
     y_preds = np.concatenate(y_preds)
     y_trues = np.array(y_trues)
     logvar_preds = np.concatenate(logvar_preds)
+    uncertainties = np.concatenate(uncertainties)
 
     return (
         loss_total / len(dataloader),
-        np.mean(uncertainties),
+        np.mean(uncertainties, -1),
         y_preds,
         y_trues,
         logvar_preds

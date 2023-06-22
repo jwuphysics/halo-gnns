@@ -1,4 +1,5 @@
 import h5py
+import illustris_python as il
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -8,19 +9,21 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
 config_params = dict(
-    boxsize=25e3,    # box size in comoving kpc/h
-    h_reduced=0.7,   # reduced Hubble constant
+    boxsize=51.7e3,    # box size in comoving kpc/h
+    h_reduced=0.704,   # reduced Hubble constant
+    snapshot=99,       # z = 0
 )
 
 normalization_params = dict(
     minimum_n_star_particles=10., # min star particles to be considered a galaxy
     norm_half_mass_radius=8., 
-    norm_velocity=100., # note: use value of `1.` if `use_central_galaxy_frame=True`
+    norm_velocity=100., # note: use value of 1 if `use_central_galaxy_frame=True`
 )
 
+# predict outputs: log_halo_mass, subhalo_vmax, both
 science_params = dict(
-    minimum_log_stellar_mass=8.5, 
-    predict_output="log_stellar_halo_mass_ratio", # or just "log_halo_mass"
+    minimum_log_stellar_mass=7.5,   # see https://arxiv.org/abs/2109.02713 (halo structure catalog)
+    predict_output="both",     
 )
 
 feature_params = dict(
@@ -57,35 +60,56 @@ def split_datasets(dataset, rng, valid_frac=0.15, test_frac=0.15, batch_size=128
     test_dataset = dataset[split_valid:split_test]
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     return train_loader, valid_loader, test_loader
 
-def load_data(filename, use_stellarhalfmassradius=True, use_velocity=True, use_only_positions=False, in_projection=True):
-    """Loads Pandas DataFrame of halos and subhalos in a given file."""
+def load_data(
+    tng_base_path="../illustris_data/TNG50-1/output", 
+    snapshot=99,  # i.e. z=0
+    use_stellarhalfmassradius=True, 
+    use_velocity=True, 
+    use_only_positions=False, 
+    in_projection=True,
+    science_params=science_params,
+):
+    """Loads Pandas DataFrame of halos, subhalos, and supplementary data in a given file."""
 
-    # details of catalog: https://www.tng-project.org/data/docs/specifications/#sec2a
-    with h5py.File(filename, "r") as f:
-        subhalo_pos = f["Subhalo/SubhaloPos"][:] / config_params["boxsize"]
-        subhalo_stellarmass = f["Subhalo/SubhaloMassType"][:,4]
-        subhalo_n_stellar_particles = f["Subhalo/SubhaloLenType"][:,4]
-        subhalo_stellarhalfmassradius = f["Subhalo/SubhaloHalfmassRadType"][:,4] / normalization_params["norm_half_mass_radius"]
-        subhalo_vel = f["Subhalo/SubhaloVel"][:] / normalization_params["norm_velocity"]
-        halo_id = f["Subhalo/SubhaloGrNr"][:]
+    # see https://www.tng-project.org/data/docs/specifications/
+    subhalo_fields = [
+        "SubhaloPos", "SubhaloMassType", "SubhaloLenType", "SubhaloHalfmassRadType", 
+        "SubhaloVel", "SubhaloVmax", "SubhaloGrNr", "SubhaloFlag"
+    ]
+    subhalos = il.groupcat.loadSubhalos(tng_base_path, snapshot, fields=subhalo_fields) 
 
-        halo_mass = f["Group/Group_M_Crit200"][:]
-        halo_primarysubhalo = f["Group/GroupFirstSub"][:]
-        group_pos = f["Group/GroupPos"][:] / config_params["boxsize"]
-        group_vel = f["Group/GroupVel"][:] / normalization_params["norm_velocity"]
+    halo_fields = ["Group_M_Crit200", "GroupFirstSub", "GroupPos", "GroupVel"]
+    halos = il.groupcat.loadHalos(tng_base_path, snapshot, fields=halo_fields)
+
+    subhalo_pos = subhalos["SubhaloPos"][:] / config_params["boxsize"]
+    subhalo_stellarmass = subhalos["SubhaloMassType"][:,4]
+    subhalo_n_stellar_particles = subhalos["SubhaloLenType"][:,4]
+    subhalo_stellarhalfmassradius = subhalos["SubhaloHalfmassRadType"][:,4] / normalization_params["norm_half_mass_radius"]
+    subhalo_vel = subhalos["SubhaloVel"][:] / normalization_params["norm_velocity"]
+    subhalo_vmax = subhalos["SubhaloVmax"][:] / normalization_params["norm_velocity"]
+    subhalo_flag = subhalos["SubhaloFlag"][:]
+    halo_id = subhalos["SubhaloGrNr"][:]
+
+    halo_mass = halos["Group_M_Crit200"][:]
+    halo_primarysubhalo = halos["GroupFirstSub"][:]  # currently not used but might be good for magnitude gap
+    group_pos = halos["GroupPos"][:] / config_params["boxsize"]
+    group_vel = halos["GroupVel"][:] / normalization_params["norm_velocity"]
 
     # get subhalos/galaxies      
     subhalos = pd.DataFrame(
-        np.column_stack([halo_id, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius]), 
-        columns=['halo_id', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius'],
+        np.column_stack([halo_id, subhalo_flag, np.arange(len(subhalo_stellarmass)), subhalo_pos, subhalo_vel, subhalo_n_stellar_particles, subhalo_stellarmass, subhalo_stellarhalfmassradius, subhalo_vmax]), 
+        columns=['halo_id', 'subhalo_flag', 'subhalo_id', 'subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_vx', 'subhalo_vy', 'subhalo_vz', 'subhalo_n_stellar_particles', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius', 'subhalo_vmax'],
     )
+    subhalos = subhalos[subhalos["subhalo_flag"] != 0].copy()
     subhalos['halo_id'] = subhalos['halo_id'].astype(int)
     subhalos['subhalo_id'] = subhalos['subhalo_id'].astype(int)
+
+    subhalos.drop("subhalo_flag", axis=1, inplace=True)
 
     # impose stellar mass and particle cuts
     subhalos = subhalos[subhalos["subhalo_n_stellar_particles"] > normalization_params["minimum_n_star_particles"]].copy()
@@ -97,8 +121,8 @@ def load_data(filename, use_stellarhalfmassradius=True, use_velocity=True, use_o
         np.column_stack((np.arange(len(halo_mass)), group_pos, group_vel, halo_mass, halo_primarysubhalo)),
         columns=['halo_id', 'halo_x', 'halo_y', 'halo_z', 'halo_vx', 'halo_vy', 'halo_vz', 'halo_mass', 'halo_primarysubhalo']
     )
-    halos = halos[halos["halo_mass"] > 0].copy()
-    halos['halo_id'] = halos['halo_id'].astype(int)
+    halos = halos[(halos["halo_mass"] > 0)].copy()
+    halos["halo_id"] = halos['halo_id'].astype(int)
     halos["halo_logmass"] = np.log10(halos["halo_mass"])
 
     df = halos.join(subhalos.set_index('halo_id'), on='halo_id').set_index('halo_id')
@@ -119,11 +143,14 @@ def load_data(filename, use_stellarhalfmassradius=True, use_velocity=True, use_o
         ]].copy()
 
     if in_projection:
-        df.drop(['subhalo_z', 'subhalo_vx', 'subhalo_vy'], axis=1, inplace=True)
+        if use_velocity:
+            df.drop(['subhalo_z', 'subhalo_vx', 'subhalo_vy'], axis=1, inplace=True)
+        else:
+            df.drop(['subhalo_z'], axis=1, inplace=True)
 
     return df
 
-def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_only_positions=False, in_projection=True):
+def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_only_positions=False, in_projection=True, science_params=science_params):
     """Iterate through a dataframe and create a PyG Data object"""
 
     dataset = []
@@ -171,9 +198,9 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
                 features = np.column_stack((subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values, subhalo_vel))
         else:
             if in_projection:
-                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius']].values
+                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values
             else:
-                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_stellarmass', 'subhalo_stellarhalfmassradius']].values
+                features = subs[['subhalo_x', 'subhalo_y', 'subhalo_z', 'subhalo_logstellarmass', 'subhalo_stellarhalfmassradius']].values
 
         # global features: N_subhalos, total stellar mass, 
         u = np.zeros((1,2), dtype=np.float32)
@@ -181,11 +208,19 @@ def generate_dataset(df, use_velocity=True, use_central_galaxy_frame=False, use_
         if not use_only_positions:
             u[0, 1] = np.log10(np.sum(10.**subs["subhalo_logstellarmass"]))
 
-        # create a new feature, which is the stellar mass to halo mass ratio 
-        if science_params["predict_output"] == "log_stellar_halo_mass_ratio":
-            y = (subs["subhalo_logstellarmass"] - subs["halo_logmass"]).max()
-        elif science_params["predict_output"] == "log_halo_mass":
-            y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
+        # note that this only works if we predict a single output...
+        match science_params["predict_output"]:
+            case "log_halo_mass":
+                y = torch.tensor(subs[["halo_logmass"]].values[0], dtype=torch.float32)
+            case "vmax":
+                y = torch.log10(torch.tensor(subs[["subhalo_vmax"]].values[0], dtype=torch.float32))
+            case "both":
+                y = torch.from_numpy(
+                    np.array([
+                        subs[["halo_logmass"]].values[0], 
+                        subs[["subhalo_vmax"]].apply(np.log10).values[0]
+                    ], dtype=np.float32)
+                ).reshape(-1, 2)
             
         # create pyg dataset
         graph = Data(

@@ -9,18 +9,21 @@ from torch_cluster import knn_graph, radius_graph
 from torch_scatter import scatter_mean, scatter_sum, scatter_max, scatter_min
 
 model_params = dict(
-    k_nn=0.2,
-    n_layers=1,  # currently doesn't work for more than 1 layer
-    n_hidden=64,
-    n_latent=64,
-    loop=False
+    D_link=100.,
+    n_layers=1,
+    n_hidden=128,
+    n_latent=96,
+    n_out=2,
+    loop=False,
+    estimate_all_subhalos=False,
+    use_global_pooling=True,
 )
 
 class EdgePointLayer(MessagePassing):
     """Adapted from https://github.com/PabloVD/HaloGraphNet.
     Initialized with `sum` aggregation, although `max` or others are possible.
     """
-    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=True):
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
         super(EdgePointLayer, self).__init__(aggr)
 
         # Initialization of the MLP:
@@ -28,11 +31,12 @@ class EdgePointLayer(MessagePassing):
         # dimensionality plus point dimensionality (=3, or 1 if only modulus is used).
         self.mlp = nn.Sequential(
             nn.Linear(2 * in_channels - 2, mid_channels, bias=True),
-            nn.SiLU(),
+            nn.LayerNorm(mid_channels),
+            nn.ReLU(),
             nn.Linear(mid_channels, mid_channels, bias=True),
-            nn.SiLU(),
+            nn.LayerNorm(mid_channels),
+            nn.ReLU(),
             nn.Linear(mid_channels, out_channels, bias=True),
-            nn.SiLU()
         )
 
         self.messages = 0.
@@ -62,45 +66,61 @@ class EdgePointLayer(MessagePassing):
         return self.messages
 
 class EdgePointGNN(nn.Module):
-    def __init__(self, node_features, n_layers, k_nn, hidden_channels=128, latent_channels=64, loop=False):
+    def __init__(self, node_features, n_layers, D_link, hidden_channels=128, aggr="sum", latent_channels=64, n_out=2, loop=True, estimate_all_subhalos=False, use_global_pooling=True):
         super(EdgePointGNN, self).__init__()
 
         in_channels = node_features
-
-        layers = [
-            EdgePointLayer(in_channels, hidden_channels, latent_channels) for _ in range(n_layers)
-        ]
-
+        
+        layers = [EdgePointLayer(in_channels, hidden_channels, latent_channels, aggr=aggr)]
+        for _ in range(n_layers-1):
+            layers += [EdgePointLayer(latent_channels, hidden_channels, latent_channels, aggr=aggr)]
+        self.n_out = n_out
         self.layers = nn.ModuleList(layers)
+        self.estimate_all_subhalos = estimate_all_subhalos
+        self.use_global_pooling = use_global_pooling
+
+        n_pool = (len(aggr) if isinstance(aggr, list) else 1) 
         self.fc = nn.Sequential(
-            nn.Linear(latent_channels * 3 + 2, latent_channels, bias=True),
-            nn.SiLU(),
+            (
+                nn.Linear(n_pool * latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos
+                else nn.Linear(latent_channels * 3, latent_channels, bias=True)
+            ),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
-            nn.SiLU(),
-            nn.Linear(latent_channels, 2, bias=True)
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, 2 * n_out, bias=True)
         )
-        self.k_nn = k_nn
+        self.D_link = D_link
         self.loop = loop
         self.pooled = 0.
         self.h = 0.
     
     def forward(self, data):
-        x, pos, batch, u = data.x, data.pos, data.batch, data.u
-
-        # determine edges by getting neighbors within radius defined by `k_nn`
-        edge_index = radius_graph(pos, r=self.k_nn, batch=batch, loop=self.loop)
+        
+        # determine edges by getting neighbors within radius defined by `D_link`
+        edge_index = radius_graph(data.pos, r=self.D_link, batch=data.batch, loop=self.loop)
 
         for layer in self.layers:
-            x = layer(x, edge_index=edge_index)
+            x = layer(data.x, edge_index=edge_index)
         
         self.h = x
-            
-        # use all the pooling! (and also the extra global features `u`)
-        addpool = global_add_pool(x, batch)
-        meanpool = global_mean_pool(x, batch)
-        maxpool = global_max_pool(x, batch)
-        self.pooled = torch.cat([addpool, meanpool, maxpool, u], dim=1)
-
-        # final fully connected layer
-        return self.fc(self.pooled)
-        
+        x = x.relu()
+        if self.estimate_all_subhalos:
+            # returns all of the subhalos
+            return self.fc(x)
+        else:
+            if self.use_global_pooling:
+                # use all the pooling! forget `u` variable..
+                addpool = global_add_pool(x, data.batch)
+                meanpool = global_mean_pool(x, data.batch)
+                maxpool = global_max_pool(x, data.batch)
+                self.pooled = torch.cat([addpool, meanpool, maxpool], dim=1)
+                # final fully connected layer
+                return self.fc(self.pooled)
+            else:
+                # retuns just the central subhalo
+                _, counts = torch.unique(batch, return_counts=True)
+                idx = torch.cumsum(counts, dim=0) - counts[0]
+                return self.fc(x[idx, :])
