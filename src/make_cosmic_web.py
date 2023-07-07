@@ -201,14 +201,14 @@ def make_webs(
                 cos1 = np.array([np.dot(unitrow[i,:].T,unitcol[i,:]) for i in range(num_pairs)])
                 cos2 = np.array([np.dot(unitrow[i,:].T,unitdiff[i,:]) for i in range(num_pairs)])
 
-                edge_attr = np.concatenate([dist.reshape(-1,1), cos1.reshape(-1,1), cos2.reshape(-1,1)], axis=1)
+                edge_attr = np.concatenate([dist.reshape(-1,1), (dist**2).reshape(-1,1), (dist**3).reshape(-1,1), cos1.reshape(-1,1), cos2.reshape(-1,1)], axis=1)
 
                 if use_loops:
                     loops = np.zeros((2,pos.shape[0]),dtype=int)
-                    atrloops = np.zeros((pos.shape[0],3))
+                    atrloops = np.zeros((pos.shape[0], edge_attr.shape[1]))
                     for i, posit in enumerate(pos):
                         loops[0,i], loops[1,i] = i, i
-                        atrloops[i,0], atrloops[i,1], atrloops[i,2] = 0., 1., 0.
+                        atrloops[i,0], atrloops[i,1], atrloops[i,2], atrloops[i,3], atrloops[i,4] = 0., 0., 0., 1., 0.
                     edge_index = np.append(edge_index, loops, 1)
                     edge_attr = np.append(edge_attr, atrloops, 0)
                 edge_index = edge_index.astype(int)
