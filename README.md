@@ -1,5 +1,7 @@
 # Graph Neural Networks (GNNs) and simulated galaxies and halos
 
+We have found that GNNs can learn the connection between galaxies and dark matter (sub)halos by incorporating information from galaxy surroundings on several-Mpc scales. Using subhalo catalogs from from cosmological hydrodynamic simulations, we found that GNNs outperform abundance matching and other ML methods.
+
 This paper is now on [arXiv](https://arxiv.org/abs/2306.12327) and [NASA ADS](https://ui.adsabs.harvard.edu/abs/2023arXiv230612327W/abstract).
 
 ## Data
