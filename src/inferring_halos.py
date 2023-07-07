@@ -55,8 +55,8 @@ predict_halo = False # gal -> dark matter, or vice versa
 
 
 cuts = {
-    "minimum_log_stellar_mass": 7.5,
-    "minimum_log_halo_mass": 9,
+    "minimum_log_stellar_mass": 9,
+    "minimum_log_halo_mass": 10,
     "minimum_n_star_particles": 50
 }
 

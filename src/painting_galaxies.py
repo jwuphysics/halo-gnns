@@ -1,19 +1,33 @@
+import argparse
 import cmasher as cmr
 import gc
 import matplotlib.pyplot as plt
-import os.path as osp
+import os
 import pickle
 import random
 import scipy.spatial
 from scipy.stats import median_abs_deviation
 from sklearn.ensemble import RandomForestRegressor
 import sys
-from torch_geometric.nn import aggr
 from tqdm import tqdm
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import (
+    MessagePassing, GCNConv, PPFConv, MetaLayer, EdgeConv,
+    global_mean_pool, global_max_pool, global_add_pool
+)
+from torch_cluster import radius_graph
+
 from data import *
-from model import *
 from train import *
+
+parser = argparse.ArgumentParser(description='Supply aggregation function and whether loops are used.')
+parser.add_argument('--aggr', help='Aggregation function: "sum", "max", or "multi"', required=True, type=str)
+parser.add_argument('--loops', help='Whether to use self-loops: "True" or "False"', required=True, type=int)
+
+args = parser.parse_args()
 
 ROOT = Path(__file__).parent.parent.resolve()
 tng_base_path = f"{ROOT}/illustris_data/TNG300-1/output"
@@ -30,19 +44,14 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ### params for generating data products, visualizations, etc.
 recompile_data = False
-retrain = True
-revalidate = True
+retrain = False
+revalidate = False
 make_plots = True
 save_models = True
 
 ### simulation and selection criteria params
 use_gal = False # gal -> dark matter, or vice versa
 
-# in_projection = True
-# proj_str = "-projected" if in_projection else ""
-
-r_link = 5    # Linking length
-pad = r_link / 2 # how much padding to add around each subbox, so the separation in total will be 2 times this
 
 cuts = {
     "minimum_log_stellar_mass": 9,
@@ -54,7 +63,7 @@ snapshot = 99 # z=0
 h = 0.6774    # Planck 2015 cosmology
 
 ### training and optimization params
-batch_size = 36
+batch_size = 9
 
 training_params = dict(
     batch_size=batch_size,
@@ -68,11 +77,8 @@ train_test_frac_split = split**2
 
 
 ### GNN params
-aggr = "max" 
 undirected = True
 periodic = False
-use_loops = True
-
 
 def make_webs(
     tng_base_path="../illustris_data/TNG300-1/output", 
@@ -261,22 +267,26 @@ def make_webs(
                 edge_attr=torch.tensor(edge_attr, dtype=torch.float)
                 pos = torch.tensor(pos, dtype=torch.float)
                 is_central = torch.tensor(df.is_central.values, dtype=bool)
+                overdensity = torch.zeros(len(x), dtype=x.dtype)
+                for i in range(len(x)):
+                    neighbors = edge_index[1, edge_index[0] == i] # get neighbor indices
+                    overdensity[i] = torch.log10((10**x[neighbors, -2]).sum()) # get sum of masses of neighbors (2nd to last index in `x`)
 
-                data.append(Data(x=x, y=y, pos=pos, is_central=is_central, edge_index=edge_index, edge_attr=edge_attr))
+                data.append(Data(x=x, y=y, pos=pos, is_central=is_central, edge_index=edge_index, edge_attr=edge_attr, overdensity=overdensity))
 
                 proj_str = "-projected" if in_projection else ""
 
                 if data_path is None:
-                    data_path = osp.join(tng_base_path, 'cosmic_graphs', f'split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl')
+                    data_path = os.path.join(tng_base_path, 'cosmic_graphs', f'split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl')
 
-                if not osp.isdir(osp.join(tng_base_path, 'cosmic_graphs')):
-                    os.mkdir(osp.join(tng_base_path, 'cosmic_graphs'))
+                if not os.path.isdir(os.path.join(tng_base_path, 'cosmic_graphs')):
+                    os.mkdir(os.path.join(tng_base_path, 'cosmic_graphs'))
 
                 with open(data_path, 'wb') as handle:
                     pickle.dump(data, handle)
 
                     
-def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, boxsize=302.6, fontsize=12):
+def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, boxsize=302.6, fontsize=12, results_path=None):
 
     fig = plt.figure(figsize=(6, 6), dpi=300)
 
@@ -331,16 +341,147 @@ def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, box
         ax.set_aspect("equal")
         ax.grid(alpha=0.15)
 
-    
-
     fig.tight_layout()
     if projection == "3d":
-        fig.savefig(f"{ROOT}/results/cosmic-graph.png", dpi=300)
+        fig.savefig(f"{results_path}/cosmic-graph.png", dpi=300)
     else:
-        fig.savefig(f"{ROOT}/results/cosmic-graph-projection.png", dpi=300)
+        fig.savefig(f"{results_path}/cosmic-graph-projection.png", dpi=300)
+    
+    plt.close()
 
         
-def train_cosmic_gnn(data, k, split=6, in_projection=False, make_plots=True):
+class EdgePointLayer(MessagePassing):
+    """Graphnet with point + edge layers.
+    
+    Very loosely inspired by https://github.com/PabloVD/HaloGraphNet.
+    Initialized with `sum` aggregation, although `max` or others are possible.
+    """
+    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
+        super(EdgePointLayer, self).__init__(aggr)
+
+        # Initialization of the MLP:
+        # Here, the number of input features correspond to the hidden node
+        # dimensionality plus point dimensionality (=3, or 1 if only modulus is used).
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * in_channels - 2, mid_channels, bias=True),
+            nn.LayerNorm(mid_channels),
+            nn.ReLU(),
+            nn.Linear(mid_channels, mid_channels, bias=True),
+            nn.LayerNorm(mid_channels),
+            nn.ReLU(),
+            nn.Linear(mid_channels, out_channels, bias=True),
+        )
+
+        self.messages = 0.
+        self.input = 0.
+        self.use_mod = use_mod
+
+    def forward(self, x, edge_index):
+        return self.propagate(edge_index, x=x)
+
+    def message(self, x_i, x_j):
+        """Message passing function:
+            x_j defines the features of neighboring nodes as shape [num_edges, in_channels]
+            pos_j defines the position of neighboring nodes as shape [num_edges, 3]
+            pos_i defines the position of central nodes as shape [num_edges, 3]
+        """
+
+        pos_i, pos_j = x_i[:,:3], x_j[:,:3]
+
+        input = pos_j - pos_i  # Compute spatial relation.
+        input = input[:,0]**2.+input[:,1]**2 + input[:,2]**2.
+        input = input.view(input.shape[0], 1)
+        input = torch.cat([x_i, x_j[:, 3:], input], dim=-1)
+
+        self.input = input
+        self.messages = self.mlp(input)
+
+        return self.messages
+
+class EdgePointGNN(nn.Module):
+    """Graph net over nodes and edges with multiple unshared layers, and sequential layers with residual connections.
+    Self-loops also get their own MLP (i.e. galaxy-halo connection).
+    """
+    def __init__(self, node_features, n_layers, D_link, hidden_channels=64, aggr="sum", latent_channels=64, n_out=2, n_unshared_layers=4, loop=True, estimate_all_subhalos=True, use_global_pooling=True):
+        super(EdgePointGNN, self).__init__()
+
+        in_channels = node_features
+        
+        layers = [
+            nn.ModuleList([
+                EdgePointLayer(in_channels, hidden_channels, latent_channels, aggr=aggr)
+                for _ in range(n_unshared_layers)
+            ])
+        ]
+        for _ in range(n_layers-1):
+            layers += [
+                nn.ModuleList([
+                    EdgePointLayer(3 * latent_channels * n_unshared_layers, hidden_channels, latent_channels, aggr=aggr) 
+                    for _ in range(n_unshared_layers)
+                ])
+            ]
+        self.n_out = n_out
+        self.layers = nn.ModuleList(layers)
+        self.estimate_all_subhalos = estimate_all_subhalos
+        self.use_global_pooling = use_global_pooling
+
+        n_pool = (len(aggr) if isinstance(aggr, list) else 1) 
+        self.fc = nn.Sequential(
+            (
+                nn.Linear((n_unshared_layers * n_pool )* latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos
+                else nn.Linear(n_unshared_layers * latent_channels * 3, latent_channels, bias=True)
+            ),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, 2 * n_out, bias=True)
+        )
+        
+        self.galaxy_halo_mlp = nn.Sequential(
+            nn.Linear(node_features, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, latent_channels, bias=True),
+            nn.LayerNorm(latent_channels),
+            nn.ReLU(),
+            nn.Linear(latent_channels, 2 * n_out, bias=True)
+        )
+        
+        self.D_link = D_link
+        self.loop = loop
+        self.pooled = 0.
+        self.h = 0.
+    
+    def forward(self, data):
+        
+        # determine edges by getting neighbors within radius defined by `D_link`
+        edge_index = radius_graph(data.pos, r=self.D_link, batch=data.batch, loop=self.loop)
+
+        x = torch.cat([unshared_layer(data.x, edge_index=edge_index) for unshared_layer in self.layers[0]], axis=1)
+        self.h = x
+        x = x.relu()
+        
+        for layer in self.layers[1:]:
+            # use residual
+            x = self.h + torch.cat([unshared_layer(x, edge_index=edge_index) for unshared_layer in layer], axis=1)
+        
+            self.h = x
+            x = x.relu()
+        
+        # x = torch.concat([x, self.galaxy_halo_mlp(data.x)], axis=1)
+        
+        if self.estimate_all_subhalos:
+            # returns all of the subhalos
+            return self.fc(x) + self.galaxy_halo_mlp(data.x)
+        else:
+            import sys
+            sys.exit()
+
+                    
+        
+def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_projection=False, make_plots=True, results_path=None, hidden_channels=256, latent_channels=128, n_layers=1, n_unshared_layers=1):
     """Trains GNN using global optimization params"""    
     proj_str = "-projected" if in_projection else ""
     
@@ -349,24 +490,22 @@ def train_cosmic_gnn(data, k, split=6, in_projection=False, make_plots=True):
     
     gc.collect();
     print(f"Training fold {k+1}/{split}" + "\n")
-
+    
     node_features = data[0].x.shape[1]
     out_features = data[0].y.shape[1]
 
-    n_hidden = 256
-    n_latent = 128
-
     model = EdgePointGNN(
         node_features=node_features, 
-        n_layers=1, 
-        D_link=5,
-        hidden_channels=n_hidden,
-        latent_channels=n_latent,
+        n_layers=n_layers, 
+        D_link=r_link,
+        hidden_channels=hidden_channels,
+        latent_channels=latent_channels,
         loop=use_loops,
+        n_unshared_layers=n_unshared_layers,
         estimate_all_subhalos=True,
         use_global_pooling=False,
         n_out=out_features,
-        aggr=aggr
+        aggr=(["sum", "max", "mean"] if aggr == "multi" else aggr)
     )
 
     model.to(device);
@@ -390,19 +529,25 @@ def train_cosmic_gnn(data, k, split=6, in_projection=False, make_plots=True):
     valid_losses = []
     for epoch in range(training_params["n_epochs"]):
 
-        # anneal 
-        if (epoch == 500):
+        # anneal at 25%, 50%, and 75%
+        if (epoch == int(training_params["n_epochs"] * 0.5)):
             optimizer = torch.optim.AdamW(
                 model.parameters(), 
                 lr=training_params["learning_rate"] / 5, 
                 weight_decay=training_params["weight_decay"] / 5
             )
-        if (epoch == 750):
+        if (epoch == int(training_params["n_epochs"] * 0.75)):
             optimizer = torch.optim.AdamW(
                 model.parameters(), 
                 lr=training_params["learning_rate"] / 25, 
                 weight_decay=training_params["weight_decay"] / 25
             )
+        # if (epoch == int(training_params["n_epochs"] * 0.75)):
+        #     optimizer = torch.optim.AdamW(
+        #         model.parameters(), 
+        #         lr=training_params["learning_rate"] / 125, 
+        #         weight_decay=training_params["weight_decay"] / 125
+        #     )
 
         train_loss = train(train_loader, model, optimizer, device, in_projection=in_projection)
         valid_loss, valid_std, p, y, logvar_p  = validate(valid_loader, model, device, in_projection=in_projection)
@@ -422,19 +567,20 @@ def train_cosmic_gnn(data, k, split=6, in_projection=False, make_plots=True):
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.grid(alpha=0.15)
-        plt.ylim(-12, -2)
+        plt.ylim(plt.ylim()[0], min(plt.ylim()[1], -2))
         plt.tight_layout()
 
-        plt.savefig(f"{ROOT}/results/painting-galaxies/training-logs/losses{proj_str}-fold{k+1}.png")
+        plt.savefig(f"{results_path}/training-logs/losses{proj_str}-fold{k+1}.png")
 
     if save_models:
         torch.save(
             model.state_dict(),
-            f"{ROOT}/models/painting-galaxies/EdgePointGNN-link{r_link}-hidden{n_hidden}-latent{n_latent}-selfloops{int(use_loops)}-agg{aggr}-epochs{training_params['n_epochs']}{proj_str}_fold{k+1}.pth", 
+            f"{results_path}/models/EdgePointGNN-link{r_link}-hidden{hidden_channels}-latent{latent_channels}-selfloops{int(use_loops)}-agg{aggr}-epochs{training_params['n_epochs']}{proj_str}_fold{k+1}.pth", 
         )
+        plt.close()
     return model
 
-def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots=True):
+def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots=True, results_path=None):
     """Validates and compares GNN model against RF models"""
     data_train = data[:k*train_test_frac_split] + data[(k+1)*train_test_frac_split:]
     data_valid = data[k*train_test_frac_split:(k+1)*train_test_frac_split]
@@ -445,21 +591,25 @@ def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots
     # actually validate model
     _, _, p_valid, y_valid, logvar_p = validate(valid_loader, model, device)
     p_valid = p_valid.reshape((-1, 1))
-    p_log_Mstar = p_valid[:, 0]
-    y_log_Mstar = y_valid[:, 0]
-    log_Mhalo = np.concatenate([d.x[:, -2] for d in data_valid])
+    y_valid = y_valid[:, 0]
+    
+
+    X_train = np.concatenate([d.x[:, -2:] for d in data_train]).reshape((-1, 2))
+    y_train = np.concatenate([d.y[:, 0] for d in data_train])
+    
+    X_valid = np.concatenate([d.x[:, -2:] for d in data_valid])
 
     # compare against random forest models
     print("Comparing against random forest models")
 
     # case one: Vmax
-    X_train = np.concatenate([d.x[:, -1] for d in data_train]).reshape((-1, 1))
+    X_train_Vmax = np.concatenate([d.x[:, -1] for d in data_train]).reshape((-1, 1))
     y_train = np.concatenate([d.y[:, 0] for d in data_train])
 
-    rf = RandomForestRegressor()
-    rf.fit(X_train, y_train)
-    X_valid = np.concatenate([d.x[:, -1] for d in data_valid]).reshape((-1, 1))
-    p_log_Mstar_rf = rf.predict(X_valid)
+    rf_Vmax = RandomForestRegressor()
+    rf_Vmax.fit(X_train_Vmax, y_train)
+    X_valid_Vmax = np.concatenate([d.x[:, -1] for d in data_valid]).reshape((-1, 1))
+    p_log_Mstar_rf_Vmax = rf_Vmax.predict(X_valid_Vmax)
 
     # case two: Mhalo
     X_train_Mh = np.concatenate([d.x[:, -2] for d in data_train]).reshape((-1, 1))
@@ -470,34 +620,46 @@ def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots
     X_valid_Mh = np.concatenate([d.x[:, -2] for d in data_valid]).reshape((-1, 1))
     p_log_Mstar_rf_Mh = rf_Mh.predict(X_valid_Mh)
 
-    # case three: combined
-    X_train_combined = np.concatenate([d.x[:, -2:] for d in data_train]).reshape((-1, 2))
+    # case three: Vmax+Mhalo
+    X_train_MhVmax = np.concatenate([d.x[:, -2:] for d in data_train]).reshape((-1, 2))
     y_train = np.concatenate([d.y[:, 0] for d in data_train])
 
-    rf_combined = RandomForestRegressor()
-    rf_combined.fit(X_train_combined, y_train)
-    X_valid_combined = np.concatenate([d.x[:, -2:] for d in data_valid]).reshape((-1, 2))
-    p_log_Mstar_rf_combined = rf_combined.predict(X_valid_combined)
+    rf_MhVmax = RandomForestRegressor()
+    rf_MhVmax.fit(X_train_MhVmax, y_train)
+    X_valid_MhVmax = np.concatenate([d.x[:, -2:] for d in data_valid]).reshape((-1, 2))
+    p_log_Mstar_rf_MhVmax = rf_MhVmax.predict(X_valid_MhVmax)
+
+    # case four: Vmax+Mhalo+delta_X
+    X_train_overdensity = np.concatenate([torch.hstack([d.x[:, -2:], d.overdensity.view(-1, 1)]) for d in data_train], 0)
+    rf_overdensity = RandomForestRegressor()
+    rf_overdensity.fit(X_train_overdensity, y_train)
+    X_valid_overdensity = np.concatenate([torch.hstack([d.x[:, -2:], d.overdensity.view(-1, 1)]) for d in data_valid], 0)
+    p_log_Mhalo_rf_overdensity = rf_overdensity.predict(X_valid_overdensity)
 
     p_gnn_key = "p_GNN_2d" if in_projection else "p_GNN_3d" 
+    overdensity_key = f"delta_{r_link}"
     df = pd.DataFrame({
-        "log_Mhalo": X_valid_combined[:, 0],
-        "log_Vmax": X_valid_combined[:, 1],
-        "log_Mstar": y_log_Mstar,
-        "p_RF_Mhalo": p_log_Mstar_rf_Mh,
-        "p_RF_Vmax": p_log_Mstar_rf,
-        "p_RF_combined": p_log_Mstar_rf_combined,
-        p_gnn_key: p_log_Mstar
+        "log_Mhalo": X_valid_overdensity[:, 0].flatten(),
+        "log_Vmax": X_valid_overdensity[:, 1].flatten(),
+        overdensity_key: X_valid_overdensity[:, 2].flatten(),
+        "log_Mstar": y_valid.flatten(),
+        "p_RF_Mhalo": p_log_Mstar_rf_Mh.flatten(),
+        "p_RF_Vmax": p_log_Mstar_rf_Vmax.flatten(),
+        "p_RF_MhVmax": p_log_Mstar_rf_MhVmax.flatten(),
+        "p_RF_overdensity": p_log_Mhalo_rf_overdensity.flatten(),
+        p_gnn_key: p_valid.flatten(),
     })
 
-    df.to_csv(f"{ROOT}/results/painting-galaxies/validation{proj_str}-fold{k+1}.csv", index=False)
+    proj_str = "-projected" if in_projection else ""
+    df.to_csv(f"{results_path}/validation{proj_str}-fold{k+1}.csv", index=False)
      
-def combine_results(split=6, centrals=None):
+
+def combine_results(split=6, centrals=None, results_path=None):
     """Combine all results, including 3d and 2d GNN"""
     results = []
     for k in range(split):
-        valid_k = pd.read_csv(f"{ROOT}/results/painting-galaxies/validation-fold{k+1}.csv")
-        valid_proj_k = pd.read_csv(f"{ROOT}/results/painting-galaxies/validation-projected-fold{k+1}.csv", usecols=["p_GNN_2d"])
+        valid_k = pd.read_csv(f"{results_path}/validation-fold{k+1}.csv")
+        valid_proj_k = pd.read_csv(f"{results_path}/validation-projected-fold{k+1}.csv", usecols=["p_GNN_2d"])
         
         valid_k["p_GNN_2d"] = valid_proj_k
         results.append(valid_k)
@@ -506,7 +668,7 @@ def combine_results(split=6, centrals=None):
     
     if centrals is not None:
         results["is_central"] = centrals
-    results.to_csv(f"{ROOT}/results/painting-galaxies/cross-validation.csv", index=False)
+    results.to_csv(f"{results_path}/cross-validation.csv", index=False)
     
     return results
 
@@ -524,10 +686,10 @@ def get_metrics(p, y):
     return rmse, nmad, mae, pearson_rho, r2, bias, f_outlier
 
 
-def save_metrics(df):
+def save_metrics(df, results_path=None):
     """Save LaTeX table of results"""
     
-    with open(f"{ROOT}/results/painting-galaxies/metrics.tex", "w") as f:
+    with open(f"{results_path}/metrics.tex", "w") as f:
         
         metrics_Mh = get_metrics(df.p_RF_Mhalo, df.log_Mstar)
         f.write("RF - $M_{\\rm halo}$ & 1 & " + " & ".join([f"{m:.3f}" for m in metrics_Mh]) + "\\\\" + "\n")
@@ -535,8 +697,11 @@ def save_metrics(df):
         metrics_Vmax = get_metrics(df.p_RF_Vmax, df.log_Mstar)
         f.write("RF - $V_{\\rm max}$ & 1 & " + " & ".join([f"{m:.3f}" for m in metrics_Vmax]) + "\\\\" + "\n")
 
-        metrics_combined = get_metrics(df.p_RF_combined, df.log_Mstar)
-        f.write("RF - $M_{\\rm halo}+V_{\\rm max}$ & 2 & " + " & ".join([f"{m:.3f}" for m in metrics_combined]) + "\\\\" + "\n")
+        metrics_MhVmax = get_metrics(df.p_RF_MhVmax, df.log_Mstar)
+        f.write("RF - $M_{\\rm halo}+V_{\\rm max}$ & 2 & " + " & ".join([f"{m:.3f}" for m in metrics_MhVmax]) + "\\\\" + "\n")
+
+        metrics_overdensity = get_metrics(df.p_RF_overdensity, df.log_Mstar)
+        f.write("RF - $M_{\\rm halo}+V_{\\rm max}+" + f"\\delta_{r_link}$ & 2 & " + " & ".join([f"{m:.3f}" for m in metrics_overdensity]) + "\\\\" + "\n")
 
         metrics_GNN_proj = get_metrics(df.p_GNN_2d, df.log_Mstar)
         f.write("GNN ($2d$ projection) & 5 & " + " & ".join([f"{m:.3f}" for m in metrics_GNN_proj]) + "\\\\" + "\n")
@@ -552,7 +717,7 @@ def save_metrics(df):
             metrics_GNN_satellites = get_metrics(df[~df.is_central].p_GNN_3d, df[~df.is_central].log_Mstar)
             f.write("GNN $(3d)$ - satellites & 8 & " + " & ".join([f"{m:.3f}" for m in metrics_GNN_satellites]) + "\\\\"+ "\n")
     
-def plot_comparison_figure(df):
+def plot_comparison_figure(df, results_path=None):
     
     sc_kwargs = dict(edgecolor='white', s=3, linewidths=0.1, cmap=cmr.dusk, vmin=11, vmax=14)
     
@@ -561,15 +726,15 @@ def plot_comparison_figure(df):
     gs = fig.add_gridspec(1, 4, wspace=0.05, left=0.05, right=0.95, bottom=0.025, top=0.975, )
     ax1, ax2, ax3, ax4 = gs.subplots(sharey="row")
 
-    ax1.scatter(df.log_Mstar, df.p_RF_Mhalo, c=df.log_Mhalo, **sc_kwargs)
-    ax1.text(0.025, 0.96, f"RF: $M_{{\\rm halo}}$\n{np.sqrt(np.mean((df.p_RF_Mhalo - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax1.transAxes, fontsize=16)
+    ax1.scatter(df.log_Mstar, df.p_RF_Vmax, c=df.log_Mhalo, **sc_kwargs)
+    ax1.text(0.025, 0.96, f"RF: $V_{{\\rm max}}$\n{np.sqrt(np.mean((df.p_RF_Vmax - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax1.transAxes, fontsize=16)
 
-    ax2.scatter(df.log_Mstar, df.p_RF_Vmax, c=df.log_Mhalo, **sc_kwargs)
-    ax2.text(0.025, 0.96, f"RF: $V_{{\\rm max}}$\n{np.sqrt(np.mean((df.p_RF_Vmax - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax2.transAxes, fontsize=16)
+    ax2.scatter(df.log_Mstar, df.p_RF_MhVmax, c=df.log_Mhalo, **sc_kwargs)
+    ax2.text(0.025, 0.96, f"RF: $V_{{\\rm max}}+M_{{\\rm halo}}$\n{np.sqrt(np.mean((df.p_RF_MhVmax - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax2.transAxes, fontsize=16)
 
-    ax3.scatter(df.log_Mstar, df.p_RF_combined, c=df.log_Mhalo, **sc_kwargs)
-    ax3.text(0.025, 0.96, f"RF: $V_{{\\rm max}}+M_{{\\rm halo}}$\n{np.sqrt(np.mean((df.p_RF_combined - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax3.transAxes, fontsize=16)
-
+    ax3.scatter(df.log_Mstar, df.p_RF_overdensity, c=df.log_Mhalo, **sc_kwargs)
+    ax3.text(0.025, 0.96, f"RF: $V_{{\\rm max}}+M_{{\\rm halo}}+\\delta$\n{np.sqrt(np.mean((df.p_RF_overdensity - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax3.transAxes, fontsize=16)
+    
     sc = ax4.scatter(df.log_Mstar, df.p_GNN_3d, c=df.log_Mhalo, **sc_kwargs)
     ax4.text(0.025, 0.96, f"GNN\n{np.sqrt(np.mean((df.p_GNN_3d - df.log_Mstar)**2)):.3f} dex", va="top", transform=ax4.transAxes, fontsize=16)
 
@@ -592,18 +757,38 @@ def plot_comparison_figure(df):
         ax.set_aspect("equal")
 
 
-    plt.savefig(f'{ROOT}/results/painting-galaxies/GNN-vs-RF.png')
+    plt.savefig(f'{results_path}/GNN-vs-RF.png')
+    plt.close()
 
     
-if __name__ == "__main__":
+def main(
+    r_link, aggr, use_loops,
+    n_hidden=64,
+    n_latent=32,
+    n_layers=4,
+    n_unshared_layers=4,
+):
+    """Run the full pipeline"""
+
+    results_path = f"{ROOT}/results/predicting-Mstar/gnns-upgraded_{aggr}_loops-{int(use_loops)}/r_link{r_link}"
     
-    if not osp.isfile(f"{ROOT}/results/painting-galaxies/cross-validation.csv") or recompile_data or retrain or revalidate:
-        for in_projection in [True, False]:
+    # make paths in case they don't exist
+    Path(f"{results_path}/data").mkdir(parents=True, exist_ok=True)
+    Path(f"{results_path}/training-logs").mkdir(parents=True, exist_ok=True)
+    Path(f"{results_path}/models").mkdir(parents=True, exist_ok=True)
+    
+
+    
+    pad = 5 # r_link / 2
+    
+    if not os.path.isfile(f"{results_path}/cross-validation.csv") or recompile_data or retrain or revalidate:
+        for in_projection in [False, True]:
+            import gc; gc.collect()
             proj_str = "-projected" if in_projection else ""
 
-            data_path = f"{results_path}/data/" + f'split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
+            data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal0{proj_str}.pkl'
 
-            if osp.isfile(data_path) and not recompile_data:
+            if os.path.isfile(data_path) and not recompile_data:
                 print('File already exists: ', end='')
             else:
                 print('Remaking dataset: ', end='')
@@ -615,27 +800,50 @@ if __name__ == "__main__":
                     pad=pad, 
                     split=split,
                     cuts=cuts, 
-                    use_gal=use_gal, 
                     h=h, 
                     undirected=undirected, 
                     periodic=periodic,
                     use_loops=use_loops, 
-                    in_projection=in_projection
+                    in_projection=in_projection,
                 )
 
             print(data_path)
             data = pickle.load(open(data_path, 'rb'))
 
             # retrain all data
-            if retrain:
-                for k in range(split):
-                    print("RE-TRAINING!!!")
-                    model = train_cosmic_gnn(data, k=k, split=split, in_projection=in_projection, make_plots=make_plots)
-                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, make_plots=make_plots)
+            if retrain or not os.path.isfile(f"{results_path}/cross-validation.csv"):
+                for k in range(split): 
+                    print("Training!")
+                    model = train_cosmic_gnn(
+                        data, k=k, r_link=r_link, aggr=aggr, use_loops=use_loops, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path, hidden_channels=n_hidden, latent_channels=n_latent, n_layers=n_layers
+                    )
+                    
+                    validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path)
             # make sure cross-validation results exist (at least the final one)
-            elif (revalidate and osp.isfile(f"{ROOT}/results/painting-galaxies/validation{proj_str}-fold{split}.csv")):
-                print("RE-VALIDATING!!!")
+            elif (revalidate and os.path.isfile(f"{results_path}/validation{proj_str}-fold{split}.csv")):
+                print("Validating!")
                 for k in range(split):
+                    gc.collect();
+
+                    node_features = data[0].x.shape[1]
+                    out_features = data[0].y.shape[1]
+
+                    model = EdgePointGNN(
+                        node_features=node_features, 
+                        n_layers=n_layers, 
+                        n_unshared_layers=n_unshared_layers,
+                        D_link=r_link,
+                        hidden_channels=n_hidden,
+                        latent_channels=n_latent,
+                        loop=use_loops,
+                        estimate_all_subhalos=True,
+                        use_global_pooling=False,
+                        n_out=out_features,
+                        aggr=(["sum", "max", "mean"] if aggr == "multi" else aggr)
+                    )
+
+                    model.to(device);
+                    model.load_state_dict(torch.load(f"{results_path}/models/EdgePointGNN-link{r_link}-hidden256-latent128-selfloops1-agg{aggr}-epochs1000_fold{k+1}.pth"))
                     validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection)
             else:
                 print("Loaded 3d data, skipping projected version")
@@ -646,22 +854,32 @@ if __name__ == "__main__":
         is_central = np.concatenate([d.is_central for d in data])
 
         # combine results together and write outputs
-        results = combine_results(split=split, centrals=is_central)
-    elif make_plots:
+        results = combine_results(split=split, centrals=is_central, results_path=results_path)
+    else:
+        print("Loading previous results (if you want to refresh the results, set retrain=True and/or revalidate=True)")
+        results = pd.read_csv(f"{results_path}/cross-validation.csv")
+    
+    print("Saved out metrics in LaTeX table format")
+    save_metrics(results, results_path=results_path)
+    
+    if make_plots:
         print("Visualizing graphs")
         for in_projection in [True, False]:
             proj_str = "-projected" if in_projection else ""
-            data_path = f"{results_path}/data/" + f'split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal{int(use_gal)}{proj_str}.pkl'
+            data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal0{proj_str}.pkl'
             data = pickle.load(open(data_path, 'rb'))
-            visualize_graph(data[-1], projection=("2d" if in_projection else "3d"))
-    else:
-        print("Loading previous results (if you want to refresh the results, set retrain=True and/or revalidate=True)")
-        results = pd.read_csv(f"{ROOT}/results/painting-galaxies/cross-validation.csv")
-    
-    print("Saved out metrics in LaTeX table format")
-    save_metrics(results)
-    
+            visualize_graph(data[-1], projection=("2d" if in_projection else "3d"), results_path=results_path)
+
+
+
     if make_plots:
         print("Saved RF and GNN comparison figure")
-        plot_comparison_figure(results)
+        plot_comparison_figure(results, results_path=results_path)
+
     
+if __name__ == "__main__":
+    aggr = args.aggr
+    use_loops = args.loops
+        
+    for r_link in [0.5, 1, 2, 3, 5, 7.5]:
+        main(r_link=r_link, aggr=aggr, use_loops=use_loops)
