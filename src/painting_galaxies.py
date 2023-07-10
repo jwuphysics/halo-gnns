@@ -881,5 +881,5 @@ if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
         
-    for r_link in [0.5, 1, 2, 3, 5, 7.5]:
+    for r_link in [3, 5, 7.5, 2.5, 4, 1.5]:
         main(r_link=r_link, aggr=aggr, use_loops=use_loops)

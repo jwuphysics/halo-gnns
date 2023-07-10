@@ -10,9 +10,8 @@ ROOT = Path(__file__).parent.parent.resolve()
 
 make_figures = True
 use_multi_aggregation = True
-split_by_mass = True
+split_by_mass = False
 predict_Mhalo = False
-
 
 def rmse_2d_lowmass(df, predict_Mhalo=predict_Mhalo): 
     y_col_true = "log_Mhalo" if predict_Mhalo else "log_Mstar"
@@ -41,11 +40,11 @@ def rmse_3d(df):
 
 if __name__ == "__main__":
     
-    D_links = [0.3, 0.5, 1, 2, 3, 5, 7.5, 10] # , 12.5, 15]
-    
+    D_links = [0.3, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10] # , 12.5, 15]
+    n_layers = 2
     
     results = dict()
-    for loop_option in [1]:
+    for loop_option in [2]:
         for aggr_option in (["max", "sum"] if not use_multi_aggregation else ["multi"]):
             
             experiment_name = f"{aggr_option}_loops-{loop_option}"
