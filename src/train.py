@@ -18,15 +18,16 @@ def train(dataloader, model, optimizer, device, augment=True, in_projection=Fals
 
     loss_total = 0
     for data in dataloader:
-
-        
-        if augment:
-            # add random noise
-            data_x_scatter = torch.std(data.x, dim=0)
-            data_y_scatter = torch.std(data.y, dim=0)
-            assert (data_x_scatter.shape[0] == len(data.x[0]))
-            data.x += 1e-5 * data_x_scatter
-            data.y += 1e-5 * data_y_scatter
+        if augment: # add random noise
+            data_node_features_scatter = 4e-3 * torch.randn_like(data.x) * torch.std(data.x, dim=0)
+            data_edge_features_scatter = 4e-3 * torch.randn_like(data.edge_attr) * torch.std(data.edge_attr, dim=0)
+            
+            data.x += data_node_features_scatter
+            data.edge_attr += data_edge_features_scatter
+            if in_projection:
+                data.pos += data_node_features_scatter[:,:2]
+            else:
+                data.pos += data_node_features_scatter[:,:3]
 
         data.to(device)
 

@@ -63,13 +63,13 @@ snapshot = 99 # z=0
 h = 0.6774    # Planck 2015 cosmology
 
 ### training and optimization params
-batch_size = 9
+batch_size = 3
 
 training_params = dict(
     batch_size=batch_size,
-    learning_rate=1e-2,
-    weight_decay=1e-4,
-    n_epochs=1000,
+    learning_rate=0.1,
+    weight_decay=1e-5,
+    n_epochs=2000,
 )
 
 split = 6 # N_subboxes = split**3
@@ -481,7 +481,10 @@ class EdgePointGNN(nn.Module):
 
                     
         
-def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_projection=False, make_plots=True, results_path=None, hidden_channels=256, latent_channels=128, n_layers=1, n_unshared_layers=1):
+def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", 
+    use_loops=True, in_projection=False, make_plots=True, results_path=None, 
+    hidden_channels=256, latent_channels=128, n_layers=1, n_unshared_layers=1
+):
     """Trains GNN using global optimization params"""    
     proj_str = "-projected" if in_projection else ""
     
@@ -522,35 +525,25 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum", use_loops=True, in_
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr=training_params["learning_rate"], 
-        weight_decay=training_params["weight_decay"]
+        weight_decay=training_params["weight_decay"],
+        betas=(0.9, 0.95),
+    )
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=training_params["learning_rate"], 
+        total_steps=len(train_loader)*training_params["n_epochs"]+1,
+        pct_start=0.1, 
+        div_factor=10,      # warm up
+        final_div_factor=10 # annealing
     )
 
     train_losses = []
     valid_losses = []
     for epoch in range(training_params["n_epochs"]):
 
-        # anneal at 25%, 50%, and 75%
-        if (epoch == int(training_params["n_epochs"] * 0.5)):
-            optimizer = torch.optim.AdamW(
-                model.parameters(), 
-                lr=training_params["learning_rate"] / 5, 
-                weight_decay=training_params["weight_decay"] / 5
-            )
-        if (epoch == int(training_params["n_epochs"] * 0.75)):
-            optimizer = torch.optim.AdamW(
-                model.parameters(), 
-                lr=training_params["learning_rate"] / 25, 
-                weight_decay=training_params["weight_decay"] / 25
-            )
-        # if (epoch == int(training_params["n_epochs"] * 0.75)):
-        #     optimizer = torch.optim.AdamW(
-        #         model.parameters(), 
-        #         lr=training_params["learning_rate"] / 125, 
-        #         weight_decay=training_params["weight_decay"] / 125
-        #     )
-
         train_loss = train(train_loader, model, optimizer, device, in_projection=in_projection)
         valid_loss, valid_std, p, y, logvar_p  = validate(valid_loader, model, device, in_projection=in_projection)
+        scheduler.step()
 
         train_losses.append(train_loss)
         valid_losses.append(valid_loss)
@@ -763,10 +756,10 @@ def plot_comparison_figure(df, results_path=None):
     
 def main(
     r_link, aggr, use_loops,
-    n_hidden=64,
-    n_latent=32,
-    n_layers=4,
-    n_unshared_layers=4,
+    n_hidden=16,
+    n_latent=16,
+    n_layers=1,
+    n_unshared_layers=16,
 ):
     """Run the full pipeline"""
 
@@ -881,5 +874,5 @@ if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
         
-    for r_link in [3, 5, 7.5, 2.5, 4, 1.5]:
+    for r_link in [1.5, 2.5, 3.5]:
         main(r_link=r_link, aggr=aggr, use_loops=use_loops)
