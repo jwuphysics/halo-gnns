@@ -44,8 +44,8 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ### params for generating data products, visualizations, etc.
 recompile_data = False
-retrain = False
-revalidate = False
+retrain = True
+revalidate = True
 make_plots = True
 save_models = True
 
@@ -63,13 +63,26 @@ snapshot = 99 # z=0
 h = 0.6774    # Planck 2015 cosmology
 
 ### training and optimization params
-batch_size = 3
+batch_size = 36
 
 training_params = dict(
     batch_size=batch_size,
-    learning_rate=0.1,
-    weight_decay=1e-5,
+    learning_rate=1e-2,
+    weight_decay=1e-4,
     n_epochs=2000,
+)
+
+model_params = dict(
+    n_hidden=16,
+    n_latent=16,
+    n_layers=1,
+    n_unshared_layers=8,
+)
+
+onecycleschedule_params = dict(
+    pct_start=0.1, 
+    div_factor=10,       # warm up
+    final_div_factor=10, # annealing
 )
 
 split = 6 # N_subboxes = split**3
@@ -351,25 +364,19 @@ def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, box
 
         
 class EdgePointLayer(MessagePassing):
-    """Graphnet with point + edge layers.
-    
-    Very loosely inspired by https://github.com/PabloVD/HaloGraphNet.
-    Initialized with `sum` aggregation, although `max` or others are possible.
+    """Interaction network layer with node + edge layers.
     """
-    def __init__(self, in_channels, mid_channels, out_channels, aggr='sum', use_mod=False):
+    def __init__(self, n_in, n_hidden, n_latent, aggr='sum', use_mod=False):
         super(EdgePointLayer, self).__init__(aggr)
 
-        # Initialization of the MLP:
-        # Here, the number of input features correspond to the hidden node
-        # dimensionality plus point dimensionality (=3, or 1 if only modulus is used).
         self.mlp = nn.Sequential(
-            nn.Linear(2 * in_channels - 2, mid_channels, bias=True),
-            nn.LayerNorm(mid_channels),
-            nn.ReLU(),
-            nn.Linear(mid_channels, mid_channels, bias=True),
-            nn.LayerNorm(mid_channels),
-            nn.ReLU(),
-            nn.Linear(mid_channels, out_channels, bias=True),
+            nn.Linear(2 * n_in - 2, n_hidden, bias=True),
+            nn.LayerNorm(n_hidden),
+            nn.SiLU(),
+            nn.Linear(n_hidden, n_hidden, bias=True),
+            nn.LayerNorm(n_hidden),
+            nn.SiLU(),
+            nn.Linear(n_hidden, n_latent, bias=True),
         )
 
         self.messages = 0.
@@ -405,11 +412,14 @@ class EdgePointGNN(nn.Module):
     def __init__(self, node_features, n_layers, D_link, hidden_channels=64, aggr="sum", latent_channels=64, n_out=2, n_unshared_layers=4, loop=True, estimate_all_subhalos=True, use_global_pooling=True):
         super(EdgePointGNN, self).__init__()
 
-        in_channels = node_features
+        self.n_in = node_features
+        self.n_out = n_out
+        self.estimate_all_subhalos = estimate_all_subhalos
+        self.use_global_pooling = use_global_pooling
         
         layers = [
             nn.ModuleList([
-                EdgePointLayer(in_channels, hidden_channels, latent_channels, aggr=aggr)
+                EdgePointLayer(n_in, hidden_channels, latent_channels, aggr=aggr)
                 for _ in range(n_unshared_layers)
             ])
         ]
@@ -420,10 +430,9 @@ class EdgePointGNN(nn.Module):
                     for _ in range(n_unshared_layers)
                 ])
             ]
-        self.n_out = n_out
+    
         self.layers = nn.ModuleList(layers)
-        self.estimate_all_subhalos = estimate_all_subhalos
-        self.use_global_pooling = use_global_pooling
+        
 
         n_pool = (len(aggr) if isinstance(aggr, list) else 1) 
         self.fc = nn.Sequential(
@@ -432,20 +441,20 @@ class EdgePointGNN(nn.Module):
                 else nn.Linear(n_unshared_layers * latent_channels * 3, latent_channels, bias=True)
             ),
             nn.LayerNorm(latent_channels),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
             nn.LayerNorm(latent_channels),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(latent_channels, 2 * n_out, bias=True)
         )
         
         self.galaxy_halo_mlp = nn.Sequential(
             nn.Linear(node_features, latent_channels, bias=True),
             nn.LayerNorm(latent_channels),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
             nn.LayerNorm(latent_channels),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(latent_channels, 2 * n_out, bias=True)
         )
         
@@ -528,14 +537,14 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
         weight_decay=training_params["weight_decay"],
         betas=(0.9, 0.95),
     )
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=training_params["learning_rate"], 
-        total_steps=len(train_loader)*training_params["n_epochs"]+1,
-        pct_start=0.1, 
-        div_factor=10,      # warm up
-        final_div_factor=10 # annealing
-    )
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer, 
+    #     max_lr=training_params["learning_rate"], 
+    #     total_steps=len(train_loader)*training_params["n_epochs"]+1,
+    #     pct_start=onecycleschedule_params["pct_start"], 
+    #     div_factor=onecycleschedule_params["div_factor"],     
+    #     final_div_factor=onecycleschedule_params["final_div_factor"] 
+    # )
 
     train_losses = []
     valid_losses = []
@@ -543,7 +552,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
 
         train_loss = train(train_loader, model, optimizer, device, in_projection=in_projection)
         valid_loss, valid_std, p, y, logvar_p  = validate(valid_loader, model, device, in_projection=in_projection)
-        scheduler.step()
+        # scheduler.step()
 
         train_losses.append(train_loss)
         valid_losses.append(valid_loss)
@@ -756,10 +765,10 @@ def plot_comparison_figure(df, results_path=None):
     
 def main(
     r_link, aggr, use_loops,
-    n_hidden=16,
-    n_latent=16,
-    n_layers=1,
-    n_unshared_layers=16,
+    n_hidden=model_params["n_hidden"],
+    n_latent=model_params["n_latent"],
+    n_layers=model_params["n_layers"],
+    n_unshared_layers=model_params["n_unshared_layers"],
 ):
     """Run the full pipeline"""
 
@@ -855,24 +864,22 @@ def main(
     print("Saved out metrics in LaTeX table format")
     save_metrics(results, results_path=results_path)
     
-    if make_plots:
-        print("Visualizing graphs")
-        for in_projection in [True, False]:
-            proj_str = "-projected" if in_projection else ""
-            data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal0{proj_str}.pkl'
-            data = pickle.load(open(data_path, 'rb'))
-            visualize_graph(data[-1], projection=("2d" if in_projection else "3d"), results_path=results_path)
+    # if make_plots:
+    #     print("Visualizing graphs")
+    #     for in_projection in [True, False]:
+    #         proj_str = "-projected" if in_projection else ""
+    #         data_path = f"{results_path}/data/" + f'gal2halo_split_{split**3}_link_{int(r_link)}_pad{int(pad)}_gal0{proj_str}.pkl'
+    #         data = pickle.load(open(data_path, 'rb'))
+    #         visualize_graph(data[-1], projection=("2d" if in_projection else "3d"), results_path=results_path)
 
-
-
-    if make_plots:
-        print("Saved RF and GNN comparison figure")
-        plot_comparison_figure(results, results_path=results_path)
+    # if make_plots:
+    #     print("Saved RF and GNN comparison figure")
+    #     plot_comparison_figure(results, results_path=results_path)
 
     
 if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
         
-    for r_link in [1.5, 2.5, 3.5]:
+    for r_link in [0.3, 0.5, 1, 2, 2.5, 3, 3.5, 4, 7.5, 10]: 
         main(r_link=r_link, aggr=aggr, use_loops=use_loops)
