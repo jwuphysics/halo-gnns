@@ -44,7 +44,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ### params for generating data products, visualizations, etc.
 recompile_data = False
-retrain = True
+retrain = False
 revalidate = True
 make_plots = True
 save_models = True
@@ -63,26 +63,26 @@ snapshot = 99 # z=0
 h = 0.6774    # Planck 2015 cosmology
 
 ### training and optimization params
-batch_size = 36
+batch_size = 3
 
 training_params = dict(
     batch_size=batch_size,
-    learning_rate=1e-2,
-    weight_decay=1e-4,
-    n_epochs=2000,
+    learning_rate=1e-1,
+    weight_decay=1e-8,
+    n_epochs=1000,
 )
 
 model_params = dict(
-    n_hidden=16,
-    n_latent=16,
+    n_hidden=32,
+    n_latent=32,
     n_layers=1,
-    n_unshared_layers=8,
+    n_unshared_layers=32,
 )
 
 onecycleschedule_params = dict(
-    pct_start=0.1, 
-    div_factor=10,       # warm up
-    final_div_factor=10, # annealing
+    pct_start=0.3, 
+    div_factor=10,        # warm up
+    final_div_factor=100, # annealing
 )
 
 split = 6 # N_subboxes = split**3
@@ -262,7 +262,19 @@ def make_webs(
                 cos1 = np.array([np.dot(unitrow[i,:].T,unitcol[i,:]) for i in range(num_pairs)])
                 cos2 = np.array([np.dot(unitrow[i,:].T,unitdiff[i,:]) for i in range(num_pairs)])
 
-                edge_attr = np.concatenate([dist.reshape(-1,1), cos1.reshape(-1,1), cos2.reshape(-1,1)], axis=1)
+                # same invariant edge features but for velocity
+                vel = np.vstack(df[['subhalo_vx', 'subhalo_vy', 'subhalo_vz']].to_numpy())
+                vel_diff = vel[row]-vel[col]
+                vel_norm = np.linalg.norm(vel_diff, axis=1)
+                vel_centroid = np.mean(vel)
+
+                vel_unitrow = (vel[row]-vel_centroid)/np.linalg.norm(vel[row]-vel_centroid, axis=1).reshape(-1, 1)
+                vel_unitcol = (vel[col]-vel_centroid)/np.linalg.norm(vel[col]-vel_centroid, axis=1).reshape(-1, 1)
+                vel_unitdiff = vel_diff / vel_norm.reshape(-1,1)
+                vel_cos1 = np.array([np.dot(vel_unitrow[i,:].T,vel_unitcol[i,:]) for i in range(num_pairs)])
+                vel_cos2 = np.array([np.dot(vel_unitrow[i,:].T,vel_unitdiff[i,:]) for i in range(num_pairs)])
+
+                edge_attr = np.concatenate([dist.reshape(-1,1), cos1.reshape(-1,1), cos2.reshape(-1,1), vel_norm.reshape(-1,1), vel_cos1.reshape(-1,1), vel_cos2.reshape(-1,1)], axis=1)
 
                 if use_loops:
                     loops = np.zeros((2,pos.shape[0]),dtype=int)
@@ -274,7 +286,7 @@ def make_webs(
                     edge_attr = np.append(edge_attr, atrloops, 0)
                 edge_index = edge_index.astype(int)
 
-                x = torch.tensor(np.vstack(df[use_cols].to_numpy()), dtype=torch.float)
+                x = torch.tensor(np.vstack(df[use_cols[-2:]].to_numpy()), dtype=torch.float) # don't use positions or velocities
                 y = torch.tensor(np.vstack(df[y_cols].to_numpy()), dtype=torch.float)
                 edge_index = torch.tensor(edge_index, dtype=torch.long)
                 edge_attr=torch.tensor(edge_attr, dtype=torch.float)
@@ -305,12 +317,12 @@ def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, box
 
     if projection=="3d":
         ax = fig.add_subplot(projection="3d")
-        pos = boxsize/2*data.x[:,:3]
-        mass = data.x[:,-2]
+        pos = boxsize/2*data.pos[:,:3]
+        mass = data.x[:,0]
     elif projection=="2d":
         ax = fig.add_subplot()
-        pos = boxsize/2*data.x[:,:2]
-        mass = data.x[:,-2]
+        pos = boxsize/2*data.pos[:,:2]
+        mass = data.x[:,0]
 
     # Draw lines for each edge
     if data.edge_index is not None and draw_edges:
@@ -363,14 +375,14 @@ def visualize_graph(data, draw_edges=True, projection="3d", edge_index=None, box
     plt.close()
 
         
-class EdgePointLayer(MessagePassing):
+class EdgeInteractionLayer(MessagePassing):
     """Interaction network layer with node + edge layers.
     """
-    def __init__(self, n_in, n_hidden, n_latent, aggr='sum', use_mod=False):
-        super(EdgePointLayer, self).__init__(aggr)
+    def __init__(self, n_in, n_hidden, n_latent, aggr='sum'):
+        super(EdgeInteractionLayer, self).__init__(aggr)
 
         self.mlp = nn.Sequential(
-            nn.Linear(2 * n_in - 2, n_hidden, bias=True),
+            nn.Linear(n_in, n_hidden, bias=True),
             nn.LayerNorm(n_hidden),
             nn.SiLU(),
             nn.Linear(n_hidden, n_hidden, bias=True),
@@ -381,52 +393,39 @@ class EdgePointLayer(MessagePassing):
 
         self.messages = 0.
         self.input = 0.
-        self.use_mod = use_mod
 
-    def forward(self, x, edge_index):
-        return self.propagate(edge_index, x=x)
+    def forward(self, x, edge_index, edge_attr):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
-    def message(self, x_i, x_j):
-        """Message passing function:
-            x_j defines the features of neighboring nodes as shape [num_edges, in_channels]
-            pos_j defines the position of neighboring nodes as shape [num_edges, 3]
-            pos_i defines the position of central nodes as shape [num_edges, 3]
-        """
+    def message(self, x_i, x_j, edge_attr):
 
-        pos_i, pos_j = x_i[:,:3], x_j[:,:3]
-
-        input = pos_j - pos_i  # Compute spatial relation.
-        input = input[:,0]**2.+input[:,1]**2 + input[:,2]**2.
-        input = input.view(input.shape[0], 1)
-        input = torch.cat([x_i, x_j[:, 3:], input], dim=-1)
-
-        self.input = input
-        self.messages = self.mlp(input)
+        self.input = torch.cat([x_i, x_j, edge_attr[0]], dim=-1)
+        self.messages = self.mlp(self.input)
 
         return self.messages
 
-class EdgePointGNN(nn.Module):
+class EdgeInteractionGNN(nn.Module):
     """Graph net over nodes and edges with multiple unshared layers, and sequential layers with residual connections.
     Self-loops also get their own MLP (i.e. galaxy-halo connection).
     """
-    def __init__(self, node_features, n_layers, D_link, hidden_channels=64, aggr="sum", latent_channels=64, n_out=2, n_unshared_layers=4, loop=True, estimate_all_subhalos=True, use_global_pooling=True):
-        super(EdgePointGNN, self).__init__()
+    def __init__(self, n_layers, D_link, node_features=2, edge_features=6, hidden_channels=64, aggr="sum", latent_channels=64, n_out=2, n_unshared_layers=4, loop=True, estimate_all_subhalos=True, use_global_pooling=True):
+        super(EdgeInteractionGNN, self).__init__()
 
-        self.n_in = node_features
+        self.n_in = 2 * node_features + edge_features 
         self.n_out = n_out
         self.estimate_all_subhalos = estimate_all_subhalos
         self.use_global_pooling = use_global_pooling
         
         layers = [
             nn.ModuleList([
-                EdgePointLayer(n_in, hidden_channels, latent_channels, aggr=aggr)
+                EdgeInteractionLayer(self.n_in, hidden_channels, latent_channels, aggr=aggr)
                 for _ in range(n_unshared_layers)
             ])
         ]
         for _ in range(n_layers-1):
             layers += [
                 nn.ModuleList([
-                    EdgePointLayer(3 * latent_channels * n_unshared_layers, hidden_channels, latent_channels, aggr=aggr) 
+                    EdgeInteractionLayer(3 * latent_channels * n_unshared_layers, hidden_channels, latent_channels, aggr=aggr) 
                     for _ in range(n_unshared_layers)
                 ])
             ]
@@ -467,23 +466,23 @@ class EdgePointGNN(nn.Module):
         
         # determine edges by getting neighbors within radius defined by `D_link`
         edge_index = radius_graph(data.pos, r=self.D_link, batch=data.batch, loop=self.loop)
+        edge_attr = data.edge_attr[edge_index]
 
-        x = torch.cat([unshared_layer(data.x, edge_index=edge_index) for unshared_layer in self.layers[0]], axis=1)
-        self.h = x
-        x = x.relu()
+        # update hidden state on edge (h, or sometimes e_ij in the text)
+        h = torch.cat([unshared_layer(data.x, edge_index=edge_index, edge_attr=edge_attr) for unshared_layer in self.layers[0]], axis=1)
+        self.h = h
+        h = h.relu()
         
         for layer in self.layers[1:]:
-            # use residual
-            x = self.h + torch.cat([unshared_layer(x, edge_index=edge_index) for unshared_layer in layer], axis=1)
+            # if multiple layers deep, also use a residual layer
+            h = self.h + torch.cat([unshared_layer(h, edge_index=edge_index) for unshared_layer in layer], axis=1)
         
-            self.h = x
-            x = x.relu()
-        
-        # x = torch.concat([x, self.galaxy_halo_mlp(data.x)], axis=1)
-        
+            self.h = h
+            h = h.relu()
+                
         if self.estimate_all_subhalos:
             # returns all of the subhalos
-            return self.fc(x) + self.galaxy_halo_mlp(data.x)
+            return (self.fc(h) + self.galaxy_halo_mlp(data.x))
         else:
             import sys
             sys.exit()
@@ -504,10 +503,12 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
     print(f"Training fold {k+1}/{split}" + "\n")
     
     node_features = data[0].x.shape[1]
+    edge_features = data[0].edge_attr.shape[1]
     out_features = data[0].y.shape[1]
 
-    model = EdgePointGNN(
-        node_features=node_features, 
+    model = EdgeInteractionGNN(
+        node_features=node_features,
+        edge_features=edge_features, 
         n_layers=n_layers, 
         D_link=r_link,
         hidden_channels=hidden_channels,
@@ -537,14 +538,14 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
         weight_decay=training_params["weight_decay"],
         betas=(0.9, 0.95),
     )
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer, 
-    #     max_lr=training_params["learning_rate"], 
-    #     total_steps=len(train_loader)*training_params["n_epochs"]+1,
-    #     pct_start=onecycleschedule_params["pct_start"], 
-    #     div_factor=onecycleschedule_params["div_factor"],     
-    #     final_div_factor=onecycleschedule_params["final_div_factor"] 
-    # )
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=training_params["learning_rate"], 
+        total_steps=len(train_loader)*training_params["n_epochs"]+1,
+        pct_start=onecycleschedule_params["pct_start"], 
+        div_factor=onecycleschedule_params["div_factor"],     
+        final_div_factor=onecycleschedule_params["final_div_factor"] 
+    )
 
     train_losses = []
     valid_losses = []
@@ -552,7 +553,7 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
 
         train_loss = train(train_loader, model, optimizer, device, in_projection=in_projection)
         valid_loss, valid_std, p, y, logvar_p  = validate(valid_loader, model, device, in_projection=in_projection)
-        # scheduler.step()
+        scheduler.step()
 
         train_losses.append(train_loss)
         valid_losses.append(valid_loss)
@@ -596,10 +597,10 @@ def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots
     y_valid = y_valid[:, 0]
     
 
-    X_train = np.concatenate([d.x[:, -2:] for d in data_train]).reshape((-1, 2))
+    X_train = np.concatenate([d.x for d in data_train]).reshape((-1, 2))
     y_train = np.concatenate([d.y[:, 0] for d in data_train])
     
-    X_valid = np.concatenate([d.x[:, -2:] for d in data_valid])
+    X_valid = np.concatenate([d.x for d in data_valid])
 
     # compare against random forest models
     print("Comparing against random forest models")
@@ -623,19 +624,19 @@ def validate_cosmic_gnn(model, data, k, split=6, in_projection=False, make_plots
     p_log_Mstar_rf_Mh = rf_Mh.predict(X_valid_Mh)
 
     # case three: Vmax+Mhalo
-    X_train_MhVmax = np.concatenate([d.x[:, -2:] for d in data_train]).reshape((-1, 2))
+    X_train_MhVmax = np.concatenate([d.x for d in data_train]).reshape((-1, 2))
     y_train = np.concatenate([d.y[:, 0] for d in data_train])
 
     rf_MhVmax = RandomForestRegressor()
     rf_MhVmax.fit(X_train_MhVmax, y_train)
-    X_valid_MhVmax = np.concatenate([d.x[:, -2:] for d in data_valid]).reshape((-1, 2))
+    X_valid_MhVmax = np.concatenate([d.x for d in data_valid]).reshape((-1, 2))
     p_log_Mstar_rf_MhVmax = rf_MhVmax.predict(X_valid_MhVmax)
 
     # case four: Vmax+Mhalo+delta_X
-    X_train_overdensity = np.concatenate([torch.hstack([d.x[:, -2:], d.overdensity.view(-1, 1)]) for d in data_train], 0)
+    X_train_overdensity = np.concatenate([torch.hstack([d.x, d.overdensity.view(-1, 1)]) for d in data_train], 0)
     rf_overdensity = RandomForestRegressor()
     rf_overdensity.fit(X_train_overdensity, y_train)
-    X_valid_overdensity = np.concatenate([torch.hstack([d.x[:, -2:], d.overdensity.view(-1, 1)]) for d in data_valid], 0)
+    X_valid_overdensity = np.concatenate([torch.hstack([d.x, d.overdensity.view(-1, 1)]) for d in data_valid], 0)
     p_log_Mhalo_rf_overdensity = rf_overdensity.predict(X_valid_overdensity)
 
     p_gnn_key = "p_GNN_2d" if in_projection else "p_GNN_3d" 
@@ -661,9 +662,9 @@ def combine_results(split=6, centrals=None, results_path=None):
     results = []
     for k in range(split):
         valid_k = pd.read_csv(f"{results_path}/validation-fold{k+1}.csv")
-        valid_proj_k = pd.read_csv(f"{results_path}/validation-projected-fold{k+1}.csv", usecols=["p_GNN_2d"])
+        # valid_proj_k = pd.read_csv(f"{results_path}/validation-projected-fold{k+1}.csv", usecols=["p_GNN_2d"])
         
-        valid_k["p_GNN_2d"] = valid_proj_k
+        # valid_k["p_GNN_2d"] = valid_proj_k
         results.append(valid_k)
     
     results = pd.concat(results, axis=0, ignore_index=True)
@@ -705,8 +706,8 @@ def save_metrics(df, results_path=None):
         metrics_overdensity = get_metrics(df.p_RF_overdensity, df.log_Mstar)
         f.write("RF - $M_{\\rm halo}+V_{\\rm max}+" + f"\\delta_{r_link}$ & 2 & " + " & ".join([f"{m:.3f}" for m in metrics_overdensity]) + "\\\\" + "\n")
 
-        metrics_GNN_proj = get_metrics(df.p_GNN_2d, df.log_Mstar)
-        f.write("GNN ($2d$ projection) & 5 & " + " & ".join([f"{m:.3f}" for m in metrics_GNN_proj]) + "\\\\" + "\n")
+        # metrics_GNN_proj = get_metrics(df.p_GNN_2d, df.log_Mstar)
+        # f.write("GNN ($2d$ projection) & 5 & " + " & ".join([f"{m:.3f}" for m in metrics_GNN_proj]) + "\\\\" + "\n")
 
         metrics_GNN = get_metrics(df.p_GNN_3d, df.log_Mstar)
         f.write("\\bf GNN $\\bm{(3d)}$ & 8 & \\bf " + " & \\bf ".join([f"{m:.3f}" for m in metrics_GNN]) + "\\\\" + "\n")
@@ -784,7 +785,7 @@ def main(
     pad = 5 # r_link / 2
     
     if not os.path.isfile(f"{results_path}/cross-validation.csv") or recompile_data or retrain or revalidate:
-        for in_projection in [False, True]:
+        for in_projection in [False]:
             import gc; gc.collect()
             proj_str = "-projected" if in_projection else ""
 
@@ -813,18 +814,14 @@ def main(
             data = pickle.load(open(data_path, 'rb'))
 
             # retrain all data
-            if retrain or not os.path.isfile(f"{results_path}/cross-validation.csv"):
-                for k in range(split): 
+            for k in range(split): 
+                if retrain or not os.path.isfile(f"{results_path}/validation{proj_str}-fold{k+1}.csv"):
                     print("Training!")
                     model = train_cosmic_gnn(
                         data, k=k, r_link=r_link, aggr=aggr, use_loops=use_loops, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path, hidden_channels=n_hidden, latent_channels=n_latent, n_layers=n_layers
                     )
-                    
                     validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection, make_plots=make_plots, results_path=results_path)
-            # make sure cross-validation results exist (at least the final one)
-            elif (revalidate and os.path.isfile(f"{results_path}/validation{proj_str}-fold{split}.csv")):
-                print("Validating!")
-                for k in range(split):
+                elif revalidate and os.path.isfile(f"{results_path}/validation_{proj_str}-fold{k+1}.csv"):
                     gc.collect();
 
                     node_features = data[0].x.shape[1]
@@ -847,9 +844,9 @@ def main(
                     model.to(device);
                     model.load_state_dict(torch.load(f"{results_path}/models/EdgePointGNN-link{r_link}-hidden256-latent128-selfloops1-agg{aggr}-epochs1000_fold{k+1}.pth"))
                     validate_cosmic_gnn(model, data, k=k, split=split, in_projection=in_projection)
-            else:
-                print("Loaded 3d data, skipping projected version")
-                break
+                else:
+                    print("Loaded 3d data, skipping projected version")
+                    break
 
 
         # keep track of which are centrals/sats
@@ -881,5 +878,5 @@ if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
         
-    for r_link in [0.3, 0.5, 1, 2, 2.5, 3, 3.5, 4, 7.5, 10]: 
+    for r_link in [10, 3, 5, 0.3, 0.5, 1, 2, 2.5, 3.5, 4, 7.5]: 
         main(r_link=r_link, aggr=aggr, use_loops=use_loops)

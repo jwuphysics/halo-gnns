@@ -24,10 +24,6 @@ def train(dataloader, model, optimizer, device, augment=True, in_projection=Fals
             
             data.x += data_node_features_scatter
             data.edge_attr += data_edge_features_scatter
-            if in_projection:
-                data.pos += data_node_features_scatter[:,:2]
-            else:
-                data.pos += data_node_features_scatter[:,:3]
 
         data.to(device)
 
