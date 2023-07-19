@@ -33,12 +33,9 @@ def train(dataloader, model, optimizer, device, augment=True, in_projection=Fals
         logvar_pred = logvar_pred.view(-1, model.n_out)
 
         # compute loss as sum of two terms for likelihood-free inference
-        if model.estimate_all_subhalos or (model.n_out > 1):
-            loss_mse = F.mse_loss(y_pred, data.y)
-            loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
-        else:
-            loss_mse = F.mse_loss(y_pred.flatten(), data.y)
-            loss_lfi = F.mse_loss((y_pred.flatten() - data.y)**2, 10**logvar_pred.flatten())
+        loss_mse = F.mse_loss(y_pred, data.y)
+        loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
+
         loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
         loss.backward()
@@ -66,12 +63,9 @@ def validate(dataloader, model, device, in_projection=False, no_velocities=False
             uncertainties.append(np.sqrt(10**logvar_pred.detach().cpu().numpy()).mean(-1))
 
             # compute loss as sum of two terms a la Moment Networks (Jeffrey & Wandelt 2020)
-            if model.estimate_all_subhalos or (model.n_out > 1):
-                loss_mse = F.mse_loss(y_pred, data.y)
-                loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
-            else:
-                loss_mse = F.mse_loss(y_pred.flatten(), data.y)
-                loss_lfi = F.mse_loss((y_pred.flatten() - data.y)**2, 10**logvar_pred.flatten())
+            loss_mse = F.mse_loss(y_pred, data.y)
+            loss_lfi = F.mse_loss((y_pred - data.y)**2, 10**logvar_pred)
+
             loss = torch.log(loss_mse) + torch.log(loss_lfi)
 
             loss_total += loss.item()

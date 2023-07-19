@@ -44,7 +44,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ### params for generating data products, visualizations, etc.
 recompile_data = False
-retrain = False
+retrain = True
 revalidate = True
 make_plots = True
 save_models = True
@@ -63,27 +63,28 @@ snapshot = 99 # z=0
 h = 0.6774    # Planck 2015 cosmology
 
 ### training and optimization params
-batch_size = 3
+batch_size = 72 # maximum batch_size 
+min_batch_size = 3 # starting batch size (see https://arxiv.org/abs/1711.00489)
 
 training_params = dict(
     batch_size=batch_size,
-    learning_rate=1e-1,
-    weight_decay=1e-8,
-    n_epochs=1000,
+    learning_rate=1e-2,
+    weight_decay=1e-5,
+    n_epochs=1500,
 )
 
 model_params = dict(
-    n_hidden=32,
-    n_latent=32,
+    n_hidden=16,
+    n_latent=16,
     n_layers=1,
-    n_unshared_layers=32,
+    n_unshared_layers=16,
 )
 
-onecycleschedule_params = dict(
-    pct_start=0.3, 
-    div_factor=10,        # warm up
-    final_div_factor=100, # annealing
-)
+# onecycleschedule_params = dict(
+#     pct_start=0.1, 
+#     div_factor=10,        # warm up
+#     final_div_factor=10, # annealing
+# )
 
 split = 6 # N_subboxes = split**3
 train_test_frac_split = split**2
@@ -408,12 +409,11 @@ class EdgeInteractionGNN(nn.Module):
     """Graph net over nodes and edges with multiple unshared layers, and sequential layers with residual connections.
     Self-loops also get their own MLP (i.e. galaxy-halo connection).
     """
-    def __init__(self, n_layers, D_link, node_features=2, edge_features=6, hidden_channels=64, aggr="sum", latent_channels=64, n_out=2, n_unshared_layers=4, loop=True, estimate_all_subhalos=True, use_global_pooling=True):
+    def __init__(self, n_layers, D_link, node_features=2, edge_features=6, hidden_channels=64, aggr="sum", latent_channels=64, n_out=2, n_unshared_layers=4, loop=True, use_global_pooling=True):
         super(EdgeInteractionGNN, self).__init__()
 
         self.n_in = 2 * node_features + edge_features 
         self.n_out = n_out
-        self.estimate_all_subhalos = estimate_all_subhalos
         self.use_global_pooling = use_global_pooling
         
         layers = [
@@ -429,26 +429,22 @@ class EdgeInteractionGNN(nn.Module):
                     for _ in range(n_unshared_layers)
                 ])
             ]
-    
+   
         self.layers = nn.ModuleList(layers)
         
-
         n_pool = (len(aggr) if isinstance(aggr, list) else 1) 
         self.fc = nn.Sequential(
-            (
-                nn.Linear((n_unshared_layers * n_pool )* latent_channels, latent_channels, bias=True) if self.estimate_all_subhalos
-                else nn.Linear(n_unshared_layers * latent_channels * 3, latent_channels, bias=True)
-            ),
+            nn.Linear((n_unshared_layers * n_pool )* latent_channels, latent_channels, bias=True),
             nn.LayerNorm(latent_channels),
             nn.SiLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
             nn.LayerNorm(latent_channels),
             nn.SiLU(),
-            nn.Linear(latent_channels, 2 * n_out, bias=True)
+            nn.Linear(latent_channels, latent_channels, bias=True)
         )
         
         self.galaxy_halo_mlp = nn.Sequential(
-            nn.Linear(node_features, latent_channels, bias=True),
+            nn.Linear(latent_channels + node_features, latent_channels, bias=True),
             nn.LayerNorm(latent_channels),
             nn.SiLU(),
             nn.Linear(latent_channels, latent_channels, bias=True),
@@ -479,13 +475,11 @@ class EdgeInteractionGNN(nn.Module):
         
             self.h = h
             h = h.relu()
+        
+        x = torch.concat([self.fc(h), data.x], axis=1) # latent channels + data.x
                 
-        if self.estimate_all_subhalos:
-            # returns all of the subhalos
-            return (self.fc(h) + self.galaxy_halo_mlp(data.x))
-        else:
-            import sys
-            sys.exit()
+        return (self.galaxy_halo_mlp(x))
+
 
                     
         
@@ -515,7 +509,6 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
         latent_channels=latent_channels,
         loop=use_loops,
         n_unshared_layers=n_unshared_layers,
-        estimate_all_subhalos=True,
         use_global_pooling=False,
         n_out=out_features,
         aggr=(["sum", "max", "mean"] if aggr == "multi" else aggr)
@@ -527,7 +520,8 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
     data_train = data[:k*train_test_frac_split] + data[(k+1)*train_test_frac_split:]
     data_valid = data[k*train_test_frac_split:(k+1)*train_test_frac_split]
 
-    train_loader = DataLoader(data_train, batch_size=batch_size, shuffle=True)
+    # use variable batch size
+    # train_loader = DataLoader(data_train, batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(data_valid, batch_size=batch_size, shuffle=False)
 
     print("Epoch    train loss   valid loss   RMSE   avg std")
@@ -538,22 +532,25 @@ def train_cosmic_gnn(data, k, split=6, r_link=5, aggr="sum",
         weight_decay=training_params["weight_decay"],
         betas=(0.9, 0.95),
     )
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=training_params["learning_rate"], 
-        total_steps=len(train_loader)*training_params["n_epochs"]+1,
-        pct_start=onecycleschedule_params["pct_start"], 
-        div_factor=onecycleschedule_params["div_factor"],     
-        final_div_factor=onecycleschedule_params["final_div_factor"] 
-    )
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer, 
+    #     max_lr=training_params["learning_rate"], 
+    #     total_steps=len(train_loader)*training_params["n_epochs"]+1,
+    #     pct_start=onecycleschedule_params["pct_start"], 
+    #     div_factor=onecycleschedule_params["div_factor"],     
+    #     final_div_factor=onecycleschedule_params["final_div_factor"] 
+    # )
 
     train_losses = []
     valid_losses = []
     for epoch in range(training_params["n_epochs"]):
+        # change batch size over time
+        scheduled_batch_size = max(min_batch_size, int(np.round(batch_size * epoch / training_params["n_epochs"])))
+        train_loader = DataLoader(data_train, batch_size=scheduled_batch_size, shuffle=True)
 
         train_loss = train(train_loader, model, optimizer, device, in_projection=in_projection)
         valid_loss, valid_std, p, y, logvar_p  = validate(valid_loader, model, device, in_projection=in_projection)
-        scheduler.step()
+        # scheduler.step()
 
         train_losses.append(train_loss)
         valid_losses.append(valid_loss)
@@ -835,7 +832,6 @@ def main(
                         hidden_channels=n_hidden,
                         latent_channels=n_latent,
                         loop=use_loops,
-                        estimate_all_subhalos=True,
                         use_global_pooling=False,
                         n_out=out_features,
                         aggr=(["sum", "max", "mean"] if aggr == "multi" else aggr)
@@ -878,5 +874,5 @@ if __name__ == "__main__":
     aggr = args.aggr
     use_loops = args.loops
         
-    for r_link in [10, 3, 5, 0.3, 0.5, 1, 2, 2.5, 3.5, 4, 7.5]: 
+    for r_link in [3, 5, 10, 0.3, 0.5, 1, 2, 2.5, 3.5, 4, 7.5]: 
         main(r_link=r_link, aggr=aggr, use_loops=use_loops)
